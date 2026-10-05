@@ -15,7 +15,7 @@ Paseo 插件：在一个侧边栏页面里集中显示各 Coding 订阅的额度
 ```bash
 npm install
 npm run typecheck
-paseo plugin install F:\codeF\llm_projects\paseo-coding-quota
+paseo plugin install F:\codeF\llm_projects\paseo-extension\paseo-coding-quota
 ```
 
 1. Paseo 侧边栏会出现「Coding 额度」，或用 Ctrl+K 搜「打开 Coding 额度」。
