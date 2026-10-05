@@ -19,7 +19,8 @@
     "client/",
     "server/",
     "shared/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

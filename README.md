@@ -1,42 +1,140 @@
-# paseo-coding-quota
+# Paseo Coding Quota
 
-Paseo 插件：在一个侧边栏页面里集中显示各 Coding 订阅的额度，重点是 5 小时窗口和每周窗口的剩余量与重置时间。
+A Paseo plugin that shows coding-plan usage for **Kimi**, **GLM**, and **Codex (ChatGPT)** in one dashboard.
 
-## 支持的服务
+It is designed for developers who use more than one coding subscription and want to see the remaining quota and reset time without switching between provider dashboards.
 
-| 服务 | 认证方式 | 显示内容 |
-| --- | --- | --- |
-| Kimi Coding Plan | 设置页粘贴 API key（可加多个账号，分别显示，如 699 档 / 199 档） | 5 小时窗口、每周窗口、加速钱包余额 |
-| GLM Coding Plan | 设置页粘贴 API key | 5 小时 token 窗口、每周 token 窗口、月度工具调用次数 |
-| Codex (ChatGPT) | 自动读取 `~/.codex/auth.json`（尊重 `CODEX_HOME`），无需输入 | 所有用量窗口（5 小时 / 每周，按套餐自动识别）、套餐、email、credits |
+> **Security note:** Paseo plugins are trusted, unsandboxed code. API keys are stored as plain JSON in the local Paseo daemon's plugin-settings directory. Only install this plugin on a daemon you trust, and never commit keys or paste them into issues, logs, or pull requests.
 
-## 安装与使用
+## Features
+
+- Kimi Coding Plan
+  - Multiple subscriptions/accounts
+  - Rolling 5-hour window
+  - Weekly window
+  - Booster wallet balance
+- GLM Coding Plan
+  - Multiple subscriptions/accounts
+  - 5-hour token window
+  - Weekly token window
+  - Monthly tool-call quota
+- Codex (ChatGPT)
+  - Reads the existing Codex CLI OAuth credentials from `~/.codex/auth.json`
+  - Honors `CODEX_HOME`
+  - Shows all windows returned by the account, including 5-hour and weekly windows when available
+  - Shows plan, account email, and credits when reported by the API
+- Automatic refresh every 60 seconds
+- A manual refresh action
+- 30-second server-side cache with single-flight requests
+- Theme-aware React Native UI for Paseo desktop, web, and mobile clients
+- No provider API keys are sent to a third-party service
+
+## Installation
+
+### Install from a local directory
 
 ```bash
 npm install
 npm run typecheck
+paseo plugin install /absolute/path/to/paseo-coding-quota
+```
+
+On Windows, for example:
+
+```powershell
 paseo plugin install F:\codeF\llm_projects\paseo-extension\paseo-coding-quota
 ```
 
-1. Paseo 侧边栏会出现「Coding 额度」，或用 Ctrl+K 搜「打开 Coding 额度」。
-2. 首次使用进 设置 → 插件 → paseo-coding-quota，添加 Kimi / GLM 的 key。数据每 60 秒自动刷新，也可手动点「刷新」。
-3. 服务端有 30 秒缓存，多个客户端同时打开也不会连环打接口。
+### Install from GitHub
 
-## 实现说明
-
-- 三个数据源（全部为各家官方客户端使用的接口，2026-10 实测）：
-  - Kimi `GET https://api.kimi.com/coding/v1/usages`
-  - GLM `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit`
-  - Codex `GET https://chatgpt.com/backend-api/wham/usage`
-- Codex 请求自动走系统代理（环境变量 `HTTPS_PROXY` 等，或 Windows 注册表 IE 代理设置）；Kimi/GLM 直连。
-- Codex 的 OAuth token 过期时（401）不会自动刷新，避免和 Codex CLI 抢 refresh token：按提示在本机跑一次 `codex` 让它自己刷新即可。
-- API key 保存在 daemon 侧的插件设置存储里（普通 host 端 JSON，不是加密保险库），只在你自己信任的 daemon 上使用。
-
-## 开发
+After this project is published to GitHub:
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm test            # vitest：三个接口的响应映射用真实结构做夹具
+paseo plugin install github:<your-github-user>/paseo-coding-quota
+```
+
+Because the plugin has a runtime dependency (`undici`), Git installation uses the preparation command in `paseo-plugin.json` to run `npm ci --omit=dev` on the daemon host.
+
+## Configuration
+
+Open **Settings → Plugins → paseo-coding-quota → Coding Quota**.
+
+### Kimi
+
+Add one entry per account. Give each entry a label such as `Kimi 699` or `Kimi 199`, then paste the corresponding API key.
+
+### GLM
+
+Add one entry per account in the same way. The current settings schema stores GLM subscriptions as an array, just like Kimi subscriptions.
+
+### Codex
+
+Enable or disable Codex usage display. When enabled, the plugin reads the credentials that the Codex CLI already stores locally. It does not refresh OAuth tokens; if the token is rejected, run Codex once so the official CLI can refresh its own credential.
+
+## Configuration storage
+
+Paseo stores the host-scoped settings at a path similar to:
+
+```text
+~/.paseo/plugin-settings/paseo-coding-quota/coding-quota.json
+```
+
+On Windows, this is normally:
+
+```text
+C:\Users\<username>\.paseo\plugin-settings\paseo-coding-quota\coding-quota.json
+```
+
+The file contains provider labels and API keys in plain JSON. An agent can configure the plugin by editing this file, but it must preserve the schema and should reload the plugin afterward:
+
+```bash
+paseo plugin reload paseo-coding-quota
+```
+
+The settings schema is versioned. The plugin automatically migrates the previous single-`glmKey` format to the current multi-account `glm` array.
+
+## Data sources
+
+The plugin calls the provider endpoints directly from the Paseo daemon:
+
+- Kimi: `GET https://api.kimi.com/coding/v1/usages`
+- GLM: `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit`
+- Codex: `GET https://chatgpt.com/backend-api/wham/usage`
+
+Codex requests use the system proxy when one is configured through `HTTPS_PROXY`, `ALL_PROXY`, or the Windows Internet Settings proxy. Kimi and GLM requests are sent directly.
+
+The response adapters are intentionally defensive: provider response fields are mapped into a small internal schema, and failed accounts are shown independently instead of hiding the other accounts.
+
+## Development
+
+```bash
+npm install
+npm run typecheck
+npm test
 paseo plugin reload paseo-coding-quota
 paseo plugin logs paseo-coding-quota
 ```
+
+The tests cover the response mapping for all three providers using fixtures based on real response shapes. Do not add real credentials to tests or fixtures.
+
+## Project layout
+
+```text
+paseo-coding-quota/
+├── client/       # React Native surfaces and settings UI
+├── server/       # Provider requests, filesystem access, and RPC handler
+├── shared/       # RPC contract and settings schema
+├── index.client.tsx
+├── index.server.ts
+└── paseo-plugin.json
+```
+
+## Compatibility
+
+- Paseo SDK: `>=0.10.0`
+- The plugin uses the runtime-entry format (`index.client.tsx` and `index.server.ts`).
+- Paseo supplies React, React Native, Zod, and the plugin SDK at runtime.
+
+## License
+
+MIT
