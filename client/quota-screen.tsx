@@ -156,8 +156,8 @@ function GlmCard({ theme, report }: { theme: PluginSurfaceProps["theme"]; report
   return (
     <Card
       theme={theme}
-      title="GLM Coding Plan"
-      subtitle={report.level ? `套餐 ${report.level}` : undefined}
+      title={report.label}
+      subtitle={`GLM Coding Plan ···${report.keyTail}`}
     >
       {report.ok ? (
         <>
@@ -273,7 +273,7 @@ export function QuotaScreen({ theme, layout }: PluginSurfaceProps) {
 
   const data = query.data;
   const empty =
-    data && data.kimi.length === 0 && data.glm === null && data.codex === null;
+    data && data.kimi.length === 0 && data.glm.length === 0 && data.codex === null;
   const updatedAt = data ? new Date(data.fetchedAt) : null;
 
   return (
@@ -308,7 +308,9 @@ export function QuotaScreen({ theme, layout }: PluginSurfaceProps) {
       {data?.kimi.map((report) => (
         <KimiCard key={report.id} theme={theme} report={report} />
       ))}
-      {data?.glm ? <GlmCard theme={theme} report={data.glm} /> : null}
+      {data?.glm.map((report) => (
+        <GlmCard key={report.id} theme={theme} report={report} />
+      ))}
       {data?.codex ? <CodexCard theme={theme} report={data.codex} /> : null}
     </ScrollView>
   );

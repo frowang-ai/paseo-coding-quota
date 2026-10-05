@@ -9,20 +9,33 @@ import { z } from "zod";
 export const quotaSettings = defineSettings({
   id: "coding-quota",
   scope: "host",
-  version: 1,
+  version: 2,
   schema: z.object({
     /** Kimi coding-plan subscriptions; each entry is queried and shown separately. */
     kimi: z.array(z.object({ id: z.string(), label: z.string(), key: z.string() })).default([]),
-    /** Optional GLM Coding Plan API key. */
-    glmKey: z.string().default(""),
+    /** GLM Coding Plan subscriptions; each entry is queried and shown separately. */
+    glm: z.array(z.object({ id: z.string(), label: z.string(), key: z.string() })).default([]),
     /** Auto-discover Codex credentials from ~/.codex/auth.json (CODEX_HOME honored). */
     codexEnabled: z.boolean().default(true),
   }),
+  migrate(values, fromVersion) {
+    if (fromVersion === 1) {
+      const old = values as { kimi?: unknown; glmKey?: unknown; codexEnabled?: unknown };
+      return {
+        kimi: old.kimi ?? [],
+        glm: typeof old.glmKey === "string" && old.glmKey
+          ? [{ id: "glm-default", label: "GLM", key: old.glmKey }]
+          : [],
+        codexEnabled: old.codexEnabled ?? true,
+      };
+    }
+    return values;
+  },
 });
 
 export interface QuotaSettingsValues {
   kimi: { id: string; label: string; key: string }[];
-  glmKey: string;
+  glm: { id: string; label: string; key: string }[];
   codexEnabled: boolean;
 }
 
@@ -46,8 +59,11 @@ export const quotaOutputSchema = z.object({
       error: z.string().nullable(),
     }),
   ),
-  glm: z
-    .object({
+  glm: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      keyTail: z.string(),
       ok: z.boolean(),
       level: z.string().nullable(),
       fiveHour: usageWindow.nullable(),
@@ -56,8 +72,8 @@ export const quotaOutputSchema = z.object({
         .object({ used: z.number(), limit: z.number(), resetAt: z.string().nullable() })
         .nullable(),
       error: z.string().nullable(),
-    })
-    .nullable(),
+    }),
+  ),
   codex: z
     .object({
       ok: z.boolean(),
@@ -80,5 +96,5 @@ export const quotaRpc = defineRpc({
 
 export type QuotaReport = z.infer<typeof quotaOutputSchema>;
 export type KimiReport = QuotaReport["kimi"][number];
-export type GlmReport = NonNullable<QuotaReport["glm"]>;
+export type GlmReport = QuotaReport["glm"][number];
 export type CodexReport = NonNullable<QuotaReport["codex"]>;

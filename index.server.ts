@@ -2,7 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { quotaRpc, quotaSettings, type QuotaSettingsValues } from "./shared/quota";
 import { getQuotaReport } from "./server/quota";
 
-const DEFAULTS: QuotaSettingsValues = { kimi: [], glmKey: "", codexEnabled: true };
+const DEFAULTS: QuotaSettingsValues = { kimi: [], glm: [], codexEnabled: true };
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(quotaSettings);

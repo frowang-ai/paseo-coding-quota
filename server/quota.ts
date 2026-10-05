@@ -241,11 +241,15 @@ export function mapGlmBody(
   return result;
 }
 
-async function fetchGlm(key: string): Promise<GlmReport> {
+async function fetchGlm(entry: { id: string; label: string; key: string }): Promise<GlmReport> {
+  const keyTail = entry.key.slice(-6);
   try {
-    const { status, body } = await httpJson(GLM_QUOTA_URL, { Authorization: `Bearer ${key}` });
+    const { status, body } = await httpJson(GLM_QUOTA_URL, { Authorization: `Bearer ${entry.key}` });
     if (status !== 200 || !(body as Record<string, unknown>)?.success) {
       return {
+        id: entry.id,
+        label: entry.label,
+        keyTail,
         ok: false,
         level: null,
         fiveHour: null,
@@ -254,9 +258,9 @@ async function fetchGlm(key: string): Promise<GlmReport> {
         error: `HTTP ${status}: ${extractError(body)}`,
       };
     }
-    return { ok: true, error: null, ...mapGlmBody(body) };
+    return { id: entry.id, label: entry.label, keyTail, ok: true, error: null, ...mapGlmBody(body) };
   } catch (error) {
-    return { ok: false, level: null, fiveHour: null, weekly: null, toolCalls: null, error: errorMessage(error) };
+    return { id: entry.id, label: entry.label, keyTail, ok: false, level: null, fiveHour: null, weekly: null, toolCalls: null, error: errorMessage(error) };
   }
 }
 
@@ -375,9 +379,9 @@ export async function getQuotaReport(
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.data;
   if (!inflight) {
     inflight = (async () => {
-      const config = await readSettings().catch(() => ({ kimi: [], glmKey: "", codexEnabled: true }));
+      const config = await readSettings().catch(() => ({ kimi: [], glm: [], codexEnabled: true }));
       const kimi = await Promise.all(config.kimi.map(fetchKimi));
-      const glm = config.glmKey ? await fetchGlm(config.glmKey) : null;
+      const glm = await Promise.all(config.glm.map(fetchGlm));
       const codex = config.codexEnabled ? await fetchCodex() : null;
       return { fetchedAt: new Date().toISOString(), kimi, glm, codex } satisfies QuotaReport;
     })()

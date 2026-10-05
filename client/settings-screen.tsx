@@ -14,8 +14,9 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
   const settings = useSettings(quotaSettings);
   const [newLabel, setNewLabel] = useState("");
   const [newKey, setNewKey] = useState("");
-  // null = untouched, use the stored value; otherwise the in-progress draft
-  const [glmDraft, setGlmDraft] = useState<string | null>(null);
+  const [newGLabel, setNewGLabel] = useState("");
+  const [newGKey, setNewGKey] = useState("");
+  const [glmDrafts, setGlmDrafts] = useState<Record<string, string>>({});
 
   if (settings.status === "loading") {
     return (
@@ -33,6 +34,15 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
   }
 
   const { values, revision, save, saving, saveError } = settings;
+
+  async function addGlm(): Promise<void> {
+    const key = newGKey.trim();
+    if (!key) return;
+    const label = newGLabel.trim() || `GLM ${values.glm.length + 1}`;
+    const id = `glm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const ok = await save({ ...values, glm: [...values.glm, { id, label, key }] }, revision);
+    if (ok) { setNewGLabel(""); setNewGKey(""); }
+  }
 
   async function addKimi(): Promise<void> {
     const key = newKey.trim();
@@ -96,22 +106,23 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
       </SettingsCard>
 
       <SettingsCard>
-        <SettingsInput
-          label="GLM Coding Plan API Key"
-          placeholder="留空表示不显示 GLM"
-          secureTextEntry
-          initialValue={values.glmKey}
-          disabled={saving}
-          onChangeText={(text) => setGlmDraft(text)}
-        />
-        <SettingsAction
-          label={values.glmKey ? "更新 GLM Key" : "保存 GLM Key"}
-          actionLabel="保存"
-          disabled={saving}
-          onPress={() => {
-            void save({ ...values, glmKey: (glmDraft ?? values.glmKey).trim() }, revision);
-          }}
-        />
+        {values.glm.map((entry) => (
+          <SettingsAction
+            key={entry.id}
+            label={`${entry.label}（···${entry.key.slice(-6)}）`}
+            actionLabel="删除"
+            disabled={saving}
+            onPress={() => void save({ ...values, glm: values.glm.filter((item) => item.id !== entry.id) }, revision)}
+          />
+        ))}
+        {values.glm.length === 0 ? (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            还没有添加 GLM 订阅。每个账号会单独显示 5 小时 / 每周窗口。
+          </Text>
+        ) : null}
+        <SettingsInput label="新 GLM 订阅标签" placeholder="如 GLM Pro" disabled={saving} onChangeText={setNewGLabel} />
+        <SettingsInput label="新 GLM API Key" placeholder="sk-…" secureTextEntry disabled={saving} onChangeText={setNewGKey} />
+        <SettingsAction label="添加 GLM 订阅" actionLabel="添加" disabled={saving || !newGKey.trim()} onPress={() => void addGlm()} />
       </SettingsCard>
 
       <SettingsCard>
