@@ -45,6 +45,22 @@ const usageWindow = z.object({
   resetAt: z.string().nullable(),
 });
 
+/**
+ * Kimi booster wallet (monthly ¥ budget for wallet-billed plans, e.g. the 199 tier).
+ * Mirrors the official Kimi CLI's extraUsage section. All money values are in
+ * yuan after conversion — balance comes from 1e6 fixed-point cents, monthly
+ * amounts from plain priceInCents.
+ */
+const kimiWallet = z.object({
+  /** Remaining wallet balance in yuan (amountLeft / 1e6 / 100, missing → 0). */
+  balanceYuan: z.number(),
+  /** Monthly charge limit in yuan when enabled (monthlyChargeLimitEnabled && > 0), else null. */
+  monthlyLimitYuan: z.number().nullable(),
+  /** Monthly spend so far in yuan (monthlyUsed.priceInCents / 100). */
+  monthlyUsedYuan: z.number(),
+  currency: z.string(),
+});
+
 export const quotaOutputSchema = z.object({
   fetchedAt: z.string(),
   kimi: z.array(
@@ -55,7 +71,9 @@ export const quotaOutputSchema = z.object({
       ok: z.boolean(),
       fiveHour: usageWindow.nullable(),
       weekly: usageWindow.nullable(),
-      walletLeftRatio: z.number().nullable(),
+      /** Monthly total window (limit_month_total), when the plan reports one. */
+      monthly: usageWindow.nullable(),
+      wallet: kimiWallet.nullable(),
       error: z.string().nullable(),
     }),
   ),

@@ -3,8 +3,12 @@
  *
  * Endpoints (all reverse-engineered from the official clients, 2026-10):
  *  - Kimi:  GET https://api.kimi.com/coding/v1/usages  (Bearer api key)
- *           body.usages.limit_5h / limit_7d: { used_ratio: 0..1, reset_time: ISO }
- *           body.booster_wallet.balance: { amount, amountLeft } as strings
+ *           body.usages.limit_5h / limit_7d / limit_month_total:
+ *           { used_ratio: 0..1, reset_time: ISO }
+ *           body.booster_wallet.balance.amount / .amountLeft: 1e6 fixed-point
+ *           cents (amountLeft omitted once exhausted → official CLI treats as 0)
+ *           body.booster_wallet.monthlyUsed / .monthlyChargeLimit:
+ *           { currency, priceInCents } in real cents
  *  - GLM:   GET https://open.bigmodel.cn/api/monitor/usage/quota/limit (Bearer api key)
  *           data.limits[]: TOKENS_LIMIT unit=3 (5h) / unit=6 (weekly),
  *           TIME_LIMIT unit=5 (monthly tool calls); percentage 0..100,
@@ -148,54 +152,109 @@ function mapKimiWindow(window: unknown): { usedRatio: number; resetAt: string | 
   return { usedRatio, resetAt: typeof resetTime === "string" ? resetTime : null };
 }
 
-export function mapKimiBody(body: unknown): Pick<KimiReport, "fiveHour" | "weekly" | "walletLeftRatio"> {
-  const usages = (body as Record<string, unknown> | null)?.usages;
-  const windows = (usages && typeof usages === "object" ? usages : {}) as Record<string, unknown>;
-  const balance = ((body as Record<string, unknown>)?.booster_wallet as Record<string, unknown> | undefined)
-    ?.balance as Record<string, unknown> | undefined;
-  let walletLeftRatio: number | null = null;
-  if (balance) {
-    const amount = Number(balance.amount);
-    const left = Number(balance.amountLeft);
-    if (Number.isFinite(amount) && amount > 0 && Number.isFinite(left)) {
-      walletLeftRatio = Math.min(1, Math.max(0, left / amount));
-    }
+// The booster wallet carries two different money encodings: balance.amount /
+// balance.amountLeft are 1e6 fixed-point cents (FIXED_POINT_CENTS in the
+// official CLI), while monthlyUsed / monthlyChargeLimit / topup prices are
+// plain cents in priceInCents. Missing amountLeft means the wallet is empty
+// (the API omits the field at zero), matching the official CLI's ?? 0.
+const KIMI_FIXED_POINT_CENTS = 1e6;
+
+function intFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
   }
+  return null;
+}
+
+function centsFromMoney(money: unknown): { cents: number; currency: string } | null {
+  if (!money || typeof money !== "object") return null;
+  const record = money as Record<string, unknown>;
+  const cents = intFromUnknown(record.priceInCents);
+  if (cents === null) return null;
+  return { cents, currency: typeof record.currency === "string" ? record.currency : "" };
+}
+
+function mapKimiWallet(wallet: unknown): KimiReport["wallet"] {
+  if (!wallet || typeof wallet !== "object") return null;
+  const record = wallet as Record<string, unknown>;
+  const balance = record.balance as Record<string, unknown> | undefined;
+  const monthlyUsed = centsFromMoney(record.monthlyUsed);
+  const monthlyLimit = centsFromMoney(record.monthlyChargeLimit);
+  const monthlyChargeLimitEnabled = record.monthlyChargeLimitEnabled === true;
+
+  let balanceYuan = 0;
+  if (balance && typeof balance === "object") {
+    const amountLeft = intFromUnknown(balance.amountLeft);
+    balanceYuan = amountLeft !== null ? amountLeft / KIMI_FIXED_POINT_CENTS / 100 : 0;
+  } else if (!monthlyUsed) {
+    return null; // no balance object and no spend data — nothing to show
+  }
+
+  const currency =
+    (monthlyLimit && monthlyLimit.currency) || (monthlyUsed && monthlyUsed.currency) || "USD";
   return {
-    fiveHour: mapKimiWindow(windows.limit_5h),
-    weekly: mapKimiWindow(windows.limit_7d),
-    walletLeftRatio,
+    balanceYuan,
+    monthlyLimitYuan:
+      monthlyChargeLimitEnabled && monthlyLimit && monthlyLimit.cents > 0
+        ? monthlyLimit.cents / 100
+        : null,
+    monthlyUsedYuan: (monthlyUsed?.cents ?? 0) / 100,
+    currency,
   };
 }
 
-async function fetchKimi(entry: { id: string; label: string; key: string }): Promise<KimiReport> {
+export function mapKimiBody(
+  body: unknown,
+): Pick<KimiReport, "fiveHour" | "weekly" | "monthly" | "wallet"> {
+  const usages = (body as Record<string, unknown> | null)?.usages;
+  const windows = (usages && typeof usages === "object" ? usages : {}) as Record<string, unknown>;
+  const boosterWallet = (body as Record<string, unknown>)?.booster_wallet;
+  return {
+    fiveHour: mapKimiWindow(windows.limit_5h),
+    weekly: mapKimiWindow(windows.limit_7d),
+    monthly: mapKimiWindow(windows.limit_month_total),
+    wallet: mapKimiWallet(boosterWallet),
+  };
+}
+
+export interface QuotaFetch<R> {
+  report: R;
+  /** HTTP status of the upstream call; null when the request never got a response. */
+  httpStatus: number | null;
+}
+
+export async function fetchKimi(entry: { id: string; label: string; key: string }): Promise<QuotaFetch<KimiReport>> {
   const keyTail = entry.key.slice(-6);
-  try {
-    const { status, body } = await httpJson(KIMI_USAGE_URL, { Authorization: `Bearer ${entry.key}` });
-    if (status !== 200) {
-      return {
-        id: entry.id,
-        label: entry.label,
-        keyTail,
-        ok: false,
-        fiveHour: null,
-        weekly: null,
-        walletLeftRatio: null,
-        error: status === 401 ? "API key 无效或已过期" : `HTTP ${status}: ${extractError(body)}`,
-      };
-    }
-    return { id: entry.id, label: entry.label, keyTail, ok: true, error: null, ...mapKimiBody(body) };
-  } catch (error) {
-    return {
+  const failed = (httpStatus: number | null, error: string): QuotaFetch<KimiReport> => ({
+    httpStatus,
+    report: {
       id: entry.id,
       label: entry.label,
       keyTail,
       ok: false,
       fiveHour: null,
       weekly: null,
-      walletLeftRatio: null,
-      error: errorMessage(error),
+      monthly: null,
+      wallet: null,
+      error,
+    },
+  });
+  try {
+    const { status, body } = await httpJson(KIMI_USAGE_URL, { Authorization: `Bearer ${entry.key}` });
+    if (status !== 200) {
+      return failed(
+        status,
+        status === 401 ? "API key 无效或已过期" : `HTTP ${status}: ${extractError(body)}`,
+      );
+    }
+    return {
+      httpStatus: status,
+      report: { id: entry.id, label: entry.label, keyTail, ok: true, error: null, ...mapKimiBody(body) },
     };
+  } catch (error) {
+    return failed(null, errorMessage(error));
   }
 }
 
@@ -241,26 +300,33 @@ export function mapGlmBody(
   return result;
 }
 
-async function fetchGlm(entry: { id: string; label: string; key: string }): Promise<GlmReport> {
+export async function fetchGlm(entry: { id: string; label: string; key: string }): Promise<QuotaFetch<GlmReport>> {
   const keyTail = entry.key.slice(-6);
+  const failed = (httpStatus: number | null, error: string): QuotaFetch<GlmReport> => ({
+    httpStatus,
+    report: {
+      id: entry.id,
+      label: entry.label,
+      keyTail,
+      ok: false,
+      level: null,
+      fiveHour: null,
+      weekly: null,
+      toolCalls: null,
+      error,
+    },
+  });
   try {
     const { status, body } = await httpJson(GLM_QUOTA_URL, { Authorization: `Bearer ${entry.key}` });
     if (status !== 200 || !(body as Record<string, unknown>)?.success) {
-      return {
-        id: entry.id,
-        label: entry.label,
-        keyTail,
-        ok: false,
-        level: null,
-        fiveHour: null,
-        weekly: null,
-        toolCalls: null,
-        error: `HTTP ${status}: ${extractError(body)}`,
-      };
+      return failed(status, `HTTP ${status}: ${extractError(body)}`);
     }
-    return { id: entry.id, label: entry.label, keyTail, ok: true, error: null, ...mapGlmBody(body) };
+    return {
+      httpStatus: status,
+      report: { id: entry.id, label: entry.label, keyTail, ok: true, error: null, ...mapGlmBody(body) },
+    };
   } catch (error) {
-    return { id: entry.id, label: entry.label, keyTail, ok: false, level: null, fiveHour: null, weekly: null, toolCalls: null, error: errorMessage(error) };
+    return failed(null, errorMessage(error));
   }
 }
 
@@ -324,7 +390,23 @@ function readCodexCredentials(): { accessToken: string; accountId: string | null
   }
 }
 
-async function fetchCodex(): Promise<CodexReport | null> {
+export function codexAccountHint(): { accountId: string | null } | null {
+  const path = codexAuthPath();
+  if (!existsSync(path)) return null;
+  try {
+    const auth = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const tokens = (auth.tokens && typeof auth.tokens === "object" ? auth.tokens : auth) as Record<
+      string,
+      unknown
+    >;
+    const accountId = typeof tokens.account_id === "string" ? tokens.account_id : null;
+    return { accountId };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchCodex(): Promise<QuotaFetch<CodexReport> | null> {
   const credentials = readCodexCredentials();
   if (!credentials) return null;
   const headers: Record<string, string> = {
@@ -336,33 +418,42 @@ async function fetchCodex(): Promise<CodexReport | null> {
     const { status, body } = await httpJson(CODEX_USAGE_URL, headers, { proxy: true });
     if (status === 401) {
       return {
-        ok: false,
-        email: null,
-        plan: null,
-        windows: [],
-        credits: null,
-        error: "Codex 登录凭证已过期：在本机运行一次 codex（任意命令）让它自动刷新后重试",
+        httpStatus: status,
+        report: {
+          ok: false,
+          email: null,
+          plan: null,
+          windows: [],
+          credits: null,
+          error: "Codex 登录凭证已过期：在本机运行一次 codex（任意命令）让它自动刷新后重试",
+        },
       };
     }
     if (status !== 200) {
       return {
+        httpStatus: status,
+        report: {
+          ok: false,
+          email: null,
+          plan: null,
+          windows: [],
+          credits: null,
+          error: `HTTP ${status}: ${extractError(body)}`,
+        },
+      };
+    }
+    return { httpStatus: status, report: { ok: true, error: null, ...mapCodexBody(body) } };
+  } catch (error) {
+    return {
+      httpStatus: null,
+      report: {
         ok: false,
         email: null,
         plan: null,
         windows: [],
         credits: null,
-        error: `HTTP ${status}: ${extractError(body)}`,
-      };
-    }
-    return { ok: true, error: null, ...mapCodexBody(body) };
-  } catch (error) {
-    return {
-      ok: false,
-      email: null,
-      plan: null,
-      windows: [],
-      credits: null,
-      error: `无法连接 chatgpt.com（可能需要代理）：${errorMessage(error)}`,
+        error: `无法连接 chatgpt.com（可能需要代理）：${errorMessage(error)}`,
+      },
     };
   }
 }
@@ -380,9 +471,10 @@ export async function getQuotaReport(
   if (!inflight) {
     inflight = (async () => {
       const config = await readSettings().catch(() => ({ kimi: [], glm: [], codexEnabled: true }));
-      const kimi = await Promise.all(config.kimi.map(fetchKimi));
-      const glm = await Promise.all(config.glm.map(fetchGlm));
-      const codex = config.codexEnabled ? await fetchCodex() : null;
+      const kimi = (await Promise.all(config.kimi.map(fetchKimi))).map((r) => r.report);
+      const glm = (await Promise.all(config.glm.map(fetchGlm))).map((r) => r.report);
+      const codexResult = config.codexEnabled ? await fetchCodex() : null;
+      const codex = codexResult ? codexResult.report : null;
       return { fetchedAt: new Date().toISOString(), kimi, glm, codex } satisfies QuotaReport;
     })()
       .then((data) => {

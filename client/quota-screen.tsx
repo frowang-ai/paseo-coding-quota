@@ -130,7 +130,34 @@ function ErrorText({ theme, message }: { theme: PluginSurfaceProps["theme"]; mes
   );
 }
 
+function formatYuan(yuan: number, currency: string): string {
+  const symbol = currency.toUpperCase() === "CNY" ? "¥" : currency.toUpperCase() === "USD" ? "$" : `${currency} `;
+  return `${symbol}${yuan.toFixed(2)}`;
+}
+
+function WalletRow({
+  theme,
+  label,
+  value,
+}: {
+  theme: PluginSurfaceProps["theme"];
+  label: string;
+  value: string;
+}) {
+  return (
+    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "baseline" }}>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{label}</Text>
+      <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>{value}</Text>
+    </View>
+  );
+}
+
 function KimiCard({ theme, report }: { theme: PluginSurfaceProps["theme"]; report: KimiReport }) {
+  const wallet = report.wallet;
+  const walletRatio =
+    wallet && wallet.monthlyLimitYuan
+      ? Math.min(1, Math.max(0, wallet.monthlyUsedYuan / wallet.monthlyLimitYuan))
+      : null;
   return (
     <Card theme={theme} title={report.label} subtitle={`Kimi 订阅 ···${report.keyTail}`}>
       {report.ok ? (
@@ -141,8 +168,21 @@ function KimiCard({ theme, report }: { theme: PluginSurfaceProps["theme"]; repor
           {report.weekly ? (
             <WindowRow theme={theme} label="每周窗口" usedRatio={report.weekly.usedRatio} resetAt={report.weekly.resetAt} />
           ) : null}
-          {report.walletLeftRatio !== null ? (
-            <WindowRow theme={theme} label="加速钱包（Booster）" usedRatio={1 - report.walletLeftRatio} resetAt={null} />
+          {report.monthly ? (
+            <WindowRow theme={theme} label="每月窗口" usedRatio={report.monthly.usedRatio} resetAt={report.monthly.resetAt} />
+          ) : null}
+          {wallet ? (
+            <View style={{ gap: 6 }}>
+              <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>月度钱包</Text>
+              {walletRatio !== null ? <ProgressBar theme={theme} usedRatio={walletRatio} /> : null}
+              <WalletRow theme={theme} label="本月已用" value={formatYuan(wallet.monthlyUsedYuan, wallet.currency)} />
+              <WalletRow
+                theme={theme}
+                label="月度上限"
+                value={wallet.monthlyLimitYuan ? formatYuan(wallet.monthlyLimitYuan, wallet.currency) : "不限"}
+              />
+              <WalletRow theme={theme} label="钱包余额" value={formatYuan(wallet.balanceYuan, wallet.currency)} />
+            </View>
           ) : null}
         </>
       ) : (

@@ -1,12 +1,17 @@
 # Paseo Coding Quota
 
-A Paseo plugin that shows coding-plan usage for **Kimi**, **GLM**, and **Codex (ChatGPT)** in one dashboard.
+A Paseo plugin that reports coding-plan usage for **Kimi**, **GLM**, and **Codex (ChatGPT)** to Paseo's built-in usage UI (sidebar footer card + Usage modal) **and** keeps a detailed per-account dashboard of its own.
 
-It is designed for developers who use more than one coding subscription and want to see the remaining quota and reset time without switching between provider dashboards.
+It is designed for developers who use more than one coding subscription and want the numbers to show up in Paseo's native quota card instead of a separate screen.
 
 > **Security note:** Paseo plugins are trusted, unsandboxed code. API keys are stored as plain JSON in the local Paseo daemon's plugin-settings directory. Only install this plugin on a daemon you trust, and never commit keys or paste them into issues, logs, or pull requests.
 
-## Features
+## How it works
+
+- `server/usage-source.ts` registers a `coding-quota` usage source (Paseo **0.11+**). Discovery lists every configured Kimi key, GLM key, and the local Codex CLI login as an account; `fetch()` translates each provider's usage payload into the `UsageWindow` / `UsageBalance` / `UsageDetail` schema the host renders.
+- `server/quota.ts` holds the per-provider fetchers. It re-detects the system proxy (env vars first, Windows registry `ProxyServer` second) so `chatgpt.com` works on machines that need an HTTP CONNECT proxy — the built-in Codex source does not do this and can fail with `fetch failed` behind a corporate or tool-driven proxy.
+- `index.client.tsx` contributes a `SidebarRow` in the sidebar footer that opens the plugin's own detailed screen, plus a Settings screen where Kimi/GLM API keys live.
+- `index.server.ts` wires the RPC handler, settings store, and the usage source to the same settings reader.
 
 - Kimi Coding Plan
   - Multiple subscriptions/accounts
@@ -131,7 +136,7 @@ paseo-coding-quota/
 
 ## Compatibility
 
-- Paseo SDK: `>=0.10.0`
+- Paseo daemon **>= 0.11.0** (`registerUsageSource` is required).
 - The plugin uses the runtime-entry format (`index.client.tsx` and `index.server.ts`).
 - Paseo supplies React, React Native, Zod, and the plugin SDK at runtime.
 

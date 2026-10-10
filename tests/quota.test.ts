@@ -18,10 +18,42 @@ const KIMI_BODY = {
       unit: "UNIT_CURRENCY",
     },
     status: "STATUS_ACTIVE",
+    monthlyUsed: { currency: "CNY", priceInCents: "40000" },
   },
   usages: {
     limit_5h: { used_ratio: 0.42, reset_time: "2026-10-05T12:15:46Z" },
     limit_7d: { used_ratio: 0.000011, reset_time: "2026-10-11T12:15:46Z" },
+  },
+};
+
+/**
+ * Real response shape for a wallet-billed 199 plan whose monthly budget is
+ * exhausted: amountLeft is omitted entirely, monthlyUsed equals the ¥700
+ * fixed-point balance amount, and the 5h/7d windows report 0 (they do not
+ * apply to this billing mode). Captured 2026-10-07.
+ */
+const KIMI_BODY_WALLET_EXHAUSTED = {
+  usage: { limit: "100", remaining: "100", resetTime: "2026-10-11T12:15:46.930934Z" },
+  booster_wallet: {
+    id: "sanitized",
+    balance: {
+      id: "sanitized",
+      feature: "FEATURE_OMNI",
+      type: "BOOSTER",
+      amount: "70000000000",
+      unit: "UNIT_CURRENCY",
+      periodStart: "2026-09-21T10:28:28.592313Z",
+      periodEnd: "2126-09-21T10:28:29.592313Z",
+      updateTime: "2026-10-06T17:04:15.459898Z",
+    },
+    status: "STATUS_ACTIVE",
+    allowTopup: true,
+    monthlyChargeLimit: { currency: "CNY", priceInCents: "0" },
+    monthlyUsed: { currency: "CNY", priceInCents: "70000" },
+  },
+  usages: {
+    limit_5h: { used_ratio: 0, reset_time: "2026-10-07T04:15:46Z" },
+    limit_7d: { used_ratio: 6e-05, reset_time: "2026-10-11T12:15:46Z" },
   },
 };
 
@@ -87,14 +119,55 @@ describe("mapKimiBody", () => {
     const mapped = mapKimiBody(KIMI_BODY);
     expect(mapped.fiveHour).toEqual({ usedRatio: 0.42, resetAt: "2026-10-05T12:15:46Z" });
     expect(mapped.weekly).toEqual({ usedRatio: 0.000011, resetAt: "2026-10-11T12:15:46Z" });
-    expect(mapped.walletLeftRatio).toBeCloseTo(15673479600 / 60000000000);
+    expect(mapped.monthly).toBeNull();
+    // amountLeft = 15673479600 fixed-point cents → ¥156.73; monthlyUsed 40000 cents → ¥400
+    expect(mapped.wallet?.balanceYuan).toBeCloseTo(156.734796);
+    expect(mapped.wallet?.monthlyLimitYuan).toBeNull();
+    expect(mapped.wallet?.monthlyUsedYuan).toBe(400);
+    expect(mapped.wallet?.currency).toBe("CNY");
+  });
+
+  it("treats a missing amountLeft as an empty wallet (exhausted 199 plan)", () => {
+    const mapped = mapKimiBody(KIMI_BODY_WALLET_EXHAUSTED);
+    expect(mapped.wallet).toEqual({
+      balanceYuan: 0,
+      monthlyLimitYuan: null,
+      monthlyUsedYuan: 700,
+      currency: "CNY",
+    });
+  });
+
+  it("maps limit_month_total when the plan reports one", () => {
+    const mapped = mapKimiBody({
+      usages: {
+        limit_5h: { used_ratio: 0.1, reset_time: "2026-10-05T12:15:46Z" },
+        limit_month_total: { used_ratio: 0.5, reset_time: "2026-11-01T00:00:00Z" },
+      },
+    });
+    expect(mapped.monthly).toEqual({ usedRatio: 0.5, resetAt: "2026-11-01T00:00:00Z" });
+  });
+
+  it("uses the monthly charge limit as the wallet ceiling when enabled", () => {
+    const mapped = mapKimiBody({
+      booster_wallet: {
+        balance: { amount: "70000000000", amountLeft: "10000000000" },
+        monthlyChargeLimitEnabled: true,
+        monthlyChargeLimit: { currency: "CNY", priceInCents: "20000" },
+        monthlyUsed: { currency: "CNY", priceInCents: "5000" },
+      },
+      usages: {},
+    });
+    expect(mapped.wallet?.monthlyLimitYuan).toBe(200);
+    expect(mapped.wallet?.monthlyUsedYuan).toBe(50);
+    expect(mapped.wallet?.balanceYuan).toBe(100);
   });
 
   it("tolerates missing sections", () => {
     const mapped = mapKimiBody({ usages: {} });
     expect(mapped.fiveHour).toBeNull();
     expect(mapped.weekly).toBeNull();
-    expect(mapped.walletLeftRatio).toBeNull();
+    expect(mapped.monthly).toBeNull();
+    expect(mapped.wallet).toBeNull();
   });
 });
 
