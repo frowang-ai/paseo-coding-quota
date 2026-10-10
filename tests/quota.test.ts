@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { codexWindowLabel, glmWindowLabel, mapCodexBody, mapGlmBody, mapKimiBody } from "../server/quota";
+import { afterAll, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { codexWindowLabel, glmWindowLabel, mapCodexBody, mapCommandCodeCredits, mapGlmBody, mapKimiBody } from "../server/quota";
+import { readBootSettings, registerCodingQuotaUsageSource } from "../server/usage-source";
+import { formatPeriodEndCountdown } from "../shared/format";
 
 /** Real response shape from https://api.kimi.com/coding/v1/usages (2026-10-05, ids sanitized). */
 const KIMI_BODY = {
@@ -114,6 +119,44 @@ const CODEX_BODY = {
   credits: { has_credits: false, unlimited: false, balance: "0" },
 };
 
+/** Real response shapes from https://api.commandcode.ai/alpha/* (2026-10-10, ids sanitized). */
+const CC_CREDITS_BODY = {
+  credits: { belowThreshold: false, creditThreshold: 0, monthlyCredits: 30.2856630512, purchasedCredits: 0, freeCredits: 0 },
+  windowLimits: {
+    limited: true,
+    exceeded: null,
+    fiveHour: { used: 0.2683153712, cap: 14, exceeded: false, resetAt: 1791634839892 },
+    weekly: { used: 22.4347120941, cap: 35, exceeded: false, resetAt: 1791787296411 },
+  },
+  sandboxAccess: true,
+  sandboxMinutes: { usedMinutes: 0, limitMinutes: 0, overageUsd: 0, resetAt: 1793491200000 },
+};
+const CC_SUB_BODY = {
+  success: true,
+  data: {
+    id: "sub_sanitized",
+    status: "active",
+    userId: "sanitized-uuid",
+    planId: "individual-goat",
+    currentPeriodEnd: "2026-10-10T14:33:18.000Z",
+  },
+};
+/** Same shape with Stripe-style cancellation signals set (period-end cancel). */
+const CC_SUB_CANCELED_BODY = {
+  success: true,
+  data: {
+    ...CC_SUB_BODY.data,
+    cancelAtPeriodEnd: true,
+    cancelAt: "2026-10-10T14:33:18.000Z",
+    canceledAt: "2026-10-09T08:00:00.000Z",
+  },
+};
+const CC_WHOAMI_BODY = {
+  success: true,
+  user: { id: "sanitized-uuid", name: "tester", email: "tester@example.com", userName: "tester" },
+  org: null,
+};
+
 describe("mapKimiBody", () => {
   it("maps 5h/7d windows and the booster wallet", () => {
     const mapped = mapKimiBody(KIMI_BODY);
@@ -191,6 +234,67 @@ describe("mapGlmBody", () => {
   });
 });
 
+describe("mapCommandCodeCredits", () => {
+  it("maps 5h/weekly windows, plan metadata, and credits balance", () => {
+    const mapped = mapCommandCodeCredits(CC_CREDITS_BODY, CC_SUB_BODY, CC_WHOAMI_BODY);
+    expect(mapped.plan).toBe("individual-goat");
+    expect(mapped.status).toBe("active");
+    expect(mapped.periodEnd).toBe("2026-10-10T14:33:18.000Z");
+    expect(mapped.user).toBe("tester@example.com");
+    expect(mapped.fiveHour?.usedRatio).toBeCloseTo(0.2683153712 / 14);
+    expect(mapped.fiveHour?.resetAt).toBe(new Date(1791634839892).toISOString());
+    expect(mapped.weekly?.usedRatio).toBeCloseTo(22.4347120941 / 35);
+    expect(mapped.weekly?.resetAt).toBe(new Date(1791787296411).toISOString());
+    expect(mapped.monthlyCredits).toBeCloseTo(30.2856630512);
+    expect(mapped.purchasedCredits).toBe(0);
+  });
+
+  it("survives missing subscription/whoami (key still valid, enrichment failed)", () => {
+    const mapped = mapCommandCodeCredits(CC_CREDITS_BODY, null, null);
+    expect(mapped.plan).toBeNull();
+    expect(mapped.user).toBeNull();
+    expect(mapped.fiveHour?.usedRatio).toBeCloseTo(0.2683153712 / 14);
+    expect(mapped.monthlyCredits).toBeCloseTo(30.2856630512);
+  });
+
+  it("defaults cancellation signals to false/null when the API omits them", () => {
+    const mapped = mapCommandCodeCredits(CC_CREDITS_BODY, CC_SUB_BODY, CC_WHOAMI_BODY);
+    expect(mapped.cancelAtPeriodEnd).toBe(false);
+    expect(mapped.cancelAt).toBeNull();
+    expect(mapped.canceledAt).toBeNull();
+  });
+
+  it("extracts Stripe-style cancellation signals", () => {
+    const mapped = mapCommandCodeCredits(CC_CREDITS_BODY, CC_SUB_CANCELED_BODY, CC_WHOAMI_BODY);
+    expect(mapped.cancelAtPeriodEnd).toBe(true);
+    expect(mapped.cancelAt).toBe("2026-10-10T14:33:18.000Z");
+    expect(mapped.canceledAt).toBe("2026-10-09T08:00:00.000Z");
+  });
+
+  it("accepts epoch-number cancel timestamps (seconds or milliseconds)", () => {
+    const seconds = mapCommandCodeCredits(
+      CC_CREDITS_BODY,
+      { success: true, data: { ...CC_SUB_BODY.data, cancelAt: 1791745998 } },
+      null,
+    );
+    expect(seconds.cancelAt).toBe(new Date(1791745998000).toISOString());
+    const millis = mapCommandCodeCredits(
+      CC_CREDITS_BODY,
+      { success: true, data: { ...CC_SUB_BODY.data, canceledAt: 1791655200000 } },
+      null,
+    );
+    expect(millis.canceledAt).toBe(new Date(1791655200000).toISOString());
+  });
+
+  it("handles plans without windowLimits", () => {
+    const mapped = mapCommandCodeCredits({ credits: { monthlyCredits: 5, purchasedCredits: 2 } }, null, null);
+    expect(mapped.fiveHour).toBeNull();
+    expect(mapped.weekly).toBeNull();
+    expect(mapped.monthlyCredits).toBe(5);
+    expect(mapped.purchasedCredits).toBe(2);
+  });
+});
+
 describe("mapCodexBody", () => {
   it("maps the primary weekly window from a ProLite plan", () => {
     const mapped = mapCodexBody(CODEX_BODY);
@@ -222,5 +326,183 @@ describe("mapCodexBody", () => {
     expect(codexWindowLabel(172800)).toBe("2 天窗口");
     expect(codexWindowLabel(7200)).toBe("2 小时窗口");
     expect(codexWindowLabel(undefined)).toBe("用量窗口");
+  });
+});
+
+describe("formatPeriodEndCountdown", () => {
+  // 2026-10-10 12:00 local time; targets are built in local time too, so the
+  // expectations hold regardless of the machine's timezone.
+  const now = new Date(2026, 9, 10, 12, 0).getTime();
+  const at = (...parts: [number, number, number, number, number]) =>
+    new Date(...parts).toISOString();
+
+  it("marks same-evening ends as 今晚", () => {
+    expect(formatPeriodEndCountdown(at(2026, 9, 10, 22, 33), now)).toBe("今晚 22:33 · 还剩 10h33m");
+  });
+
+  it("marks same-day daytime ends as 今天", () => {
+    expect(formatPeriodEndCountdown(at(2026, 9, 10, 14, 5), now)).toBe("今天 14:05 · 还剩 2h5m");
+  });
+
+  it("marks tomorrow ends as 明天", () => {
+    expect(formatPeriodEndCountdown(at(2026, 9, 11, 9, 0), now)).toBe("明天 09:00 · 还剩 21h0m");
+  });
+
+  it("uses the weekday within a week", () => {
+    const weekday = ["日", "一", "二", "三", "四", "五", "六"][new Date(2026, 9, 13).getDay()];
+    expect(formatPeriodEndCountdown(at(2026, 9, 13, 8, 30), now)).toBe(`周${weekday} 08:30 · 还剩 2d20h`);
+  });
+
+  it("falls back to MM-DD beyond a week", () => {
+    expect(formatPeriodEndCountdown(at(2027, 0, 5, 10, 0), now)).toBe("01-05 10:00 · 还剩 86d");
+  });
+
+  it("collapses past timestamps to 已到期", () => {
+    expect(formatPeriodEndCountdown(at(2026, 9, 10, 11, 59), now)).toBe("已到期");
+  });
+
+  it("returns empty for invalid input", () => {
+    expect(formatPeriodEndCountdown("not-a-date", now)).toBe("");
+  });
+});
+
+describe("readBootSettings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "coding-quota-boot-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const file = (name: string): string => join(dir, name);
+
+  it("parses the daemon settings file with entry labels", () => {
+    writeFileSync(
+      file("ok.json"),
+      JSON.stringify({
+        version: 3,
+        kimi: [{ id: "kimi_a", label: "kimi-me-699", key: "sk-a" }],
+        glm: [{ id: "glm-default", label: "GLM", key: "sk-g" }],
+        commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c" }],
+        codexEnabled: true,
+      }),
+    );
+    expect(readBootSettings(file("ok.json"))).toEqual({
+      kimi: [{ id: "kimi_a", label: "kimi-me-699", key: "sk-a" }],
+      glm: [{ id: "glm-default", label: "GLM", key: "sk-g" }],
+      commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c" }],
+      codexEnabled: true,
+    });
+  });
+
+  it("accepts the { values } envelope shape", () => {
+    writeFileSync(
+      file("envelope.json"),
+      JSON.stringify({ values: { kimi: [{ id: "k", label: "L", key: "K" }], glm: [], commandcode: [] } }),
+    );
+    expect(readBootSettings(file("envelope.json"))?.kimi).toEqual([{ id: "k", label: "L", key: "K" }]);
+  });
+
+  it("drops malformed entries and defaults codexEnabled to true", () => {
+    writeFileSync(
+      file("partial.json"),
+      JSON.stringify({ kimi: [{ id: "ok", label: 5, key: "k" }, { nope: true }, "junk"], glm: [] }),
+    );
+    const boot = readBootSettings(file("partial.json"));
+    expect(boot?.kimi).toEqual([{ id: "ok", label: "", key: "k" }]);
+    expect(boot?.codexEnabled).toBe(true);
+  });
+
+  it("returns null for missing, garbage, or entry-less files", () => {
+    expect(readBootSettings(file("missing.json"))).toBeNull();
+    writeFileSync(file("garbage.json"), "{not json");
+    expect(readBootSettings(file("garbage.json"))).toBeNull();
+    writeFileSync(file("empty.json"), JSON.stringify({ kimi: [], glm: [], commandcode: [] }));
+    expect(readBootSettings(file("empty.json"))).toBeNull();
+  });
+});
+
+describe("registerCodingQuotaUsageSource", () => {
+  const bootDir = mkdtempSync(join(tmpdir(), "coding-quota-home-"));
+  const settingsFile = join(bootDir, "plugin-settings", "paseo-coding-quota", "coding-quota.json");
+  const bootConfig = {
+    kimi: [
+      { id: "kimi_a", label: "kimi-me-699", key: "sk-a" },
+      { id: "kimi_b", label: "kimi-2-199", key: "sk-b" },
+    ],
+    glm: [{ id: "glm-default", label: "GLM", key: "sk-g" }],
+    commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c" }],
+    codexEnabled: false,
+  };
+  const previousPaseoHome = process.env.PASEO_HOME;
+
+  afterAll(() => {
+    process.env.PASEO_HOME = previousPaseoHome;
+    rmSync(bootDir, { recursive: true, force: true });
+  });
+
+  function stubServer() {
+    const sources: { id: string; label: string; discover: unknown }[] = [];
+    const server = {
+      registerUsageSource: (source: { id: string; label: string; discover: unknown }) => {
+        sources.push(source);
+      },
+    };
+    return { server, sources };
+  }
+
+  it("registers every source synchronously before contribute returns (ready-snapshot contract)", async () => {
+    process.env.PASEO_HOME = bootDir;
+    mkdirSync(join(bootDir, "plugin-settings", "paseo-coding-quota"), { recursive: true });
+    writeFileSync(settingsFile, JSON.stringify(bootConfig));
+
+    const { server, sources } = stubServer();
+    registerCodingQuotaUsageSource(server as never, async () => bootConfig);
+
+    // No async continuation may be pending: the list must be complete right now.
+    expect(sources).toHaveLength(8);
+    expect(sources.map((s) => s.label)).toEqual([
+      "kimi-me-699",
+      "kimi-2-199",
+      "Kimi（新订阅）",
+      "GLM",
+      "GLM（新订阅）",
+      "CmdCode goat",
+      "CmdCode（新订阅）",
+      "Codex（ChatGPT）",
+    ]);
+    const ids = sources.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toMatch(/^[a-z][a-z0-9._-]*$/);
+
+    // Per-account discover gates on the live settings and names no account label.
+    const kimiSource = sources.find((s) => s.label === "kimi-me-699") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string; label?: string }[]>;
+    };
+    expect(await kimiSource.discover({ kind: "global" })).toEqual([
+      { key: "kimi-kimi_a", harness: "Kimi", input: { provider: "kimi", entryId: "kimi_a" } },
+    ]);
+    expect(await kimiSource.discover({ kind: "session", provider: "x" } as never)).toEqual([]);
+
+    // The catch-all covers exactly the entries without their own source.
+    const catchAll = sources.find((s) => s.label === "Kimi（新订阅）") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string }[]>;
+    };
+    expect((await catchAll.discover({ kind: "global" })).map((a) => a.key)).toEqual([]);
+
+    const live = {
+      ...bootConfig,
+      kimi: [...bootConfig.kimi, { id: "kimi_new", label: "new", key: "sk-n" }],
+    };
+    const liveServer = stubServer();
+    registerCodingQuotaUsageSource(liveServer.server as never, async () => live);
+    const liveCatchAll = liveServer.sources.find(
+      (s) => s.label === "Kimi（新订阅）",
+    ) as unknown as { discover: (scope: { kind: string }) => Promise<{ key: string }[]> };
+    expect((await liveCatchAll.discover({ kind: "global" })).map((a) => a.key)).toEqual([
+      "kimi-kimi_new",
+    ]);
+  });
+
+  it("falls back to provider-named sources when the settings file is unreadable", () => {
+    process.env.PASEO_HOME = join(bootDir, "does-not-exist");
+    const { server, sources } = stubServer();
+    registerCodingQuotaUsageSource(server as never, async () => bootConfig);
+    expect(sources.map((s) => s.label)).toEqual(["Kimi", "GLM", "CmdCode", "Codex（ChatGPT）"]);
   });
 });

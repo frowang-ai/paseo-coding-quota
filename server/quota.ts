@@ -20,13 +20,24 @@
  *           chatgpt.com usually needs a proxy on this machine, so Codex
  *           requests go through the detected system/env proxy while Kimi and
  *           GLM stay direct.
+ *  - Command Code (commandcode.ai): three parallel calls on
+ *           https://api.commandcode.ai —
+ *             GET /alpha/whoami?limits=1            → { user: {email,userName}, org }
+ *             GET /alpha/billing/credits            → { credits: {monthlyCredits,
+ *                                                       purchasedCredits, freeCredits},
+ *                                                       windowLimits: {fiveHour{used,
+ *                                                       cap,resetAt}, weekly{…}} }
+ *             GET /alpha/billing/subscriptions      → { data: {planId,status,
+ *                                                       currentPeriodEnd} }
+ *           Bearer user_… API key. api.commandcode.ai also needs the proxy on
+ *           this machine (direct connect times out), same as chatgpt.com.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fetch, ProxyAgent, type Dispatcher } from "undici";
-import type { CodexReport, GlmReport, KimiReport, QuotaReport, QuotaSettingsValues } from "../shared/quota";
+import type { CodexReport, CommandCodeReport, GlmReport, KimiReport, QuotaReport, QuotaSettingsValues } from "../shared/quota";
 
 const TIMEOUT_MS = 20_000;
 const CACHE_TTL_MS = 30_000;
@@ -34,6 +45,7 @@ const CACHE_TTL_MS = 30_000;
 const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const GLM_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const COMMANDCODE_BASE = "https://api.commandcode.ai";
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -138,6 +150,15 @@ function isoFromEpochSeconds(seconds: unknown): string | null {
 
 function isoFromEpochMs(ms: unknown): string | null {
   return typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/** Accepts an ISO string or an epoch number (seconds or milliseconds); null otherwise. */
+function isoFromUnknown(value: unknown): string | null {
+  if (typeof value === "string" && value.trim() !== "") return value;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value < 1e12 ? value * 1000 : value).toISOString();
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +480,137 @@ export async function fetchCodex(): Promise<QuotaFetch<CodexReport> | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Command Code (commandcode.ai) — Bearer API key, three parallel calls
+
+interface CommandCodeWindow {
+  used: number;
+  cap: number;
+  resetAt: number | null; // epoch ms
+}
+
+function mapCommandCodeWindow(window: unknown): { usedRatio: number; resetAt: string | null; used: number; cap: number } | null {
+  if (!window || typeof window !== "object") return null;
+  const record = window as Record<string, unknown>;
+  const used = typeof record.used === "number" && Number.isFinite(record.used) ? record.used : null;
+  const cap = typeof record.cap === "number" && Number.isFinite(record.cap) && record.cap > 0 ? record.cap : null;
+  if (used === null || cap === null) return null;
+  const resetAt = typeof record.resetAt === "number" && Number.isFinite(record.resetAt) ? record.resetAt : null;
+  return {
+    usedRatio: Math.min(1, Math.max(0, used / cap)),
+    resetAt: resetAt !== null ? new Date(resetAt).toISOString() : null,
+    used,
+    cap,
+  };
+}
+
+export function mapCommandCodeCredits(
+  creditsBody: unknown,
+  subscriptionBody: unknown,
+  whoamiBody: unknown,
+): Pick<
+  CommandCodeReport,
+  | "user"
+  | "plan"
+  | "status"
+  | "periodEnd"
+  | "cancelAtPeriodEnd"
+  | "cancelAt"
+  | "canceledAt"
+  | "fiveHour"
+  | "weekly"
+  | "monthlyCredits"
+  | "purchasedCredits"
+> {
+  const creditsRec = (creditsBody ?? {}) as Record<string, unknown>;
+  const windowLimits = creditsRec.windowLimits as Record<string, unknown> | undefined;
+  const credits = creditsRec.credits as Record<string, unknown> | undefined;
+
+  const sub = (subscriptionBody ?? {}) as Record<string, unknown>;
+  const subData = (sub.data ?? {}) as Record<string, unknown>;
+
+  const whoami = (whoamiBody ?? {}) as Record<string, unknown>;
+  const user = (whoami.user ?? {}) as Record<string, unknown>;
+
+  const monthlyCredits = typeof credits?.monthlyCredits === "number" && Number.isFinite(credits.monthlyCredits) ? credits.monthlyCredits : null;
+  const purchasedCredits = typeof credits?.purchasedCredits === "number" && Number.isFinite(credits.purchasedCredits) ? credits.purchasedCredits : null;
+
+  const fiveHour = mapCommandCodeWindow(windowLimits?.fiveHour);
+  const weekly = mapCommandCodeWindow(windowLimits?.weekly);
+
+  return {
+    user: typeof user.email === "string" ? user.email : typeof user.userName === "string" ? user.userName : null,
+    plan: typeof subData.planId === "string" ? subData.planId : null,
+    status: typeof subData.status === "string" ? subData.status : null,
+    periodEnd: typeof subData.currentPeriodEnd === "string" ? subData.currentPeriodEnd : null,
+    cancelAtPeriodEnd: subData.cancelAtPeriodEnd === true,
+    cancelAt: isoFromUnknown(subData.cancelAt),
+    canceledAt: isoFromUnknown(subData.canceledAt),
+    fiveHour: fiveHour ? { usedRatio: fiveHour.usedRatio, resetAt: fiveHour.resetAt } : null,
+    weekly: weekly ? { usedRatio: weekly.usedRatio, resetAt: weekly.resetAt } : null,
+    monthlyCredits,
+    purchasedCredits,
+  };
+}
+
+export async function fetchCommandCode(entry: { id: string; label: string; key: string }): Promise<QuotaFetch<CommandCodeReport>> {
+  const keyTail = entry.key.slice(-6);
+  const failed = (httpStatus: number | null, error: string): QuotaFetch<CommandCodeReport> => ({
+    httpStatus,
+    report: {
+      id: entry.id,
+      label: entry.label,
+      keyTail,
+      ok: false,
+      user: null,
+      plan: null,
+      status: null,
+      periodEnd: null,
+      cancelAtPeriodEnd: false,
+      cancelAt: null,
+      canceledAt: null,
+      fiveHour: null,
+      weekly: null,
+      monthlyCredits: null,
+      purchasedCredits: null,
+      error,
+    },
+  });
+
+  const headers = { Authorization: `Bearer ${entry.key}`, Accept: "application/json" };
+  const opts = { proxy: true };
+  try {
+    const [whoamiRes, creditsRes, subRes] = await Promise.all([
+      httpJson(`${COMMANDCODE_BASE}/alpha/whoami?limits=1`, headers, opts),
+      httpJson(`${COMMANDCODE_BASE}/alpha/billing/credits`, headers, opts),
+      httpJson(`${COMMANDCODE_BASE}/alpha/billing/subscriptions`, headers, opts),
+    ]);
+
+    // credits is the load-bearing call; whoami/subscriptions are optional enrichment.
+    if (creditsRes.status === 401) {
+      return failed(401, "API key 无效或已过期");
+    }
+    if (creditsRes.status !== 200) {
+      return failed(creditsRes.status, `HTTP ${creditsRes.status}: ${extractError(creditsRes.body)}`);
+    }
+
+    const mapped = mapCommandCodeCredits(creditsRes.body, subRes.status === 200 ? subRes.body : null, whoamiRes.status === 200 ? whoamiRes.body : null);
+    return {
+      httpStatus: creditsRes.status,
+      report: {
+        id: entry.id,
+        label: entry.label,
+        keyTail,
+        ok: true,
+        error: null,
+        ...mapped,
+      },
+    };
+  } catch (error) {
+    return failed(null, `无法连接 api.commandcode.ai（可能需要代理）：${errorMessage(error)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Aggregated report with a small cache + single-flight
 
 let cached: { at: number; data: QuotaReport } | null = null;
@@ -470,12 +622,13 @@ export async function getQuotaReport(
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.data;
   if (!inflight) {
     inflight = (async () => {
-      const config = await readSettings().catch(() => ({ kimi: [], glm: [], codexEnabled: true }));
+      const config = await readSettings().catch(() => ({ kimi: [], glm: [], commandcode: [], codexEnabled: true }));
       const kimi = (await Promise.all(config.kimi.map(fetchKimi))).map((r) => r.report);
       const glm = (await Promise.all(config.glm.map(fetchGlm))).map((r) => r.report);
+      const commandcode = (await Promise.all((config.commandcode ?? []).map(fetchCommandCode))).map((r) => r.report);
       const codexResult = config.codexEnabled ? await fetchCodex() : null;
       const codex = codexResult ? codexResult.report : null;
-      return { fetchedAt: new Date().toISOString(), kimi, glm, codex } satisfies QuotaReport;
+      return { fetchedAt: new Date().toISOString(), kimi, glm, codex, commandcode } satisfies QuotaReport;
     })()
       .then((data) => {
         cached = { at: Date.now(), data };

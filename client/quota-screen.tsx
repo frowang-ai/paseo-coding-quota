@@ -2,7 +2,8 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { quotaRpc, type CodexReport, type GlmReport, type KimiReport } from "../shared/quota";
+import { quotaRpc, type CodexReport, type CommandCodeReport, type GlmReport, type KimiReport } from "../shared/quota";
+import { formatMoney, formatPeriodEndCountdown } from "../shared/format";
 import { openQuotaSettings } from "./navigation";
 
 const REFRESH_MS = 60_000;
@@ -130,24 +131,21 @@ function ErrorText({ theme, message }: { theme: PluginSurfaceProps["theme"]; mes
   );
 }
 
-function formatYuan(yuan: number, currency: string): string {
-  const symbol = currency.toUpperCase() === "CNY" ? "¥" : currency.toUpperCase() === "USD" ? "$" : `${currency} `;
-  return `${symbol}${yuan.toFixed(2)}`;
-}
-
 function WalletRow({
   theme,
   label,
   value,
+  danger = false,
 }: {
   theme: PluginSurfaceProps["theme"];
   label: string;
   value: string;
+  danger?: boolean;
 }) {
   return (
     <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "baseline" }}>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{label}</Text>
-      <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>{value}</Text>
+      <Text style={{ color: danger ? theme.colors.statusDanger : theme.colors.foregroundMuted, fontSize: 12 }}>{label}</Text>
+      <Text style={{ color: danger ? theme.colors.statusDanger : theme.colors.foreground, fontSize: 13 }}>{value}</Text>
     </View>
   );
 }
@@ -175,13 +173,13 @@ function KimiCard({ theme, report }: { theme: PluginSurfaceProps["theme"]; repor
             <View style={{ gap: 6 }}>
               <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>月度钱包</Text>
               {walletRatio !== null ? <ProgressBar theme={theme} usedRatio={walletRatio} /> : null}
-              <WalletRow theme={theme} label="本月已用" value={formatYuan(wallet.monthlyUsedYuan, wallet.currency)} />
+              <WalletRow theme={theme} label="本月已用" value={formatMoney(wallet.monthlyUsedYuan, wallet.currency)} />
               <WalletRow
                 theme={theme}
                 label="月度上限"
-                value={wallet.monthlyLimitYuan ? formatYuan(wallet.monthlyLimitYuan, wallet.currency) : "不限"}
+                value={wallet.monthlyLimitYuan ? formatMoney(wallet.monthlyLimitYuan, wallet.currency) : "不限"}
               />
-              <WalletRow theme={theme} label="钱包余额" value={formatYuan(wallet.balanceYuan, wallet.currency)} />
+              <WalletRow theme={theme} label="钱包余额" value={formatMoney(wallet.balanceYuan, wallet.currency)} />
             </View>
           ) : null}
         </>
@@ -254,11 +252,61 @@ function CodexCard({ theme, report }: { theme: PluginSurfaceProps["theme"]; repo
   );
 }
 
+function CommandCodeCard({ theme, report }: { theme: PluginSurfaceProps["theme"]; report: CommandCodeReport }) {
+  const subtitle = [
+    report.plan ? `套餐 ${report.plan}` : null,
+    report.user,
+    `···${report.keyTail}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const cancelPending =
+    report.cancelAtPeriodEnd || report.cancelAt !== null || report.canceledAt !== null;
+  const endIso = report.cancelAt ?? report.periodEnd;
+  return (
+    <Card theme={theme} title={report.label} subtitle={subtitle || undefined}>
+      {report.ok ? (
+        <>
+          {report.fiveHour ? (
+            <WindowRow theme={theme} label="5 小时窗口" usedRatio={report.fiveHour.usedRatio} resetAt={report.fiveHour.resetAt} />
+          ) : null}
+          {report.weekly ? (
+            <WindowRow theme={theme} label="每周窗口" usedRatio={report.weekly.usedRatio} resetAt={report.weekly.resetAt} />
+          ) : null}
+          {report.monthlyCredits !== null || (report.purchasedCredits ?? 0) > 0 || endIso !== null || report.canceledAt !== null ? (
+            <View style={{ gap: 6 }}>
+              {report.monthlyCredits !== null ? (
+                <WalletRow theme={theme} label="月度剩余额度" value={`$${report.monthlyCredits.toFixed(2)}`} />
+              ) : null}
+              {(report.purchasedCredits ?? 0) > 0 ? (
+                <WalletRow theme={theme} label="已购额度余额" value={`$${(report.purchasedCredits ?? 0).toFixed(2)}`} />
+              ) : null}
+              {endIso ? (
+                <WalletRow
+                  theme={theme}
+                  danger={cancelPending}
+                  label={cancelPending ? "到期（不续订）" : "账期截止"}
+                  value={formatPeriodEndCountdown(endIso) || endIso.slice(0, 10)}
+                />
+              ) : null}
+              {report.status && report.status !== "active" ? (
+                <WalletRow theme={theme} label="订阅状态" value={report.status} />
+              ) : null}
+            </View>
+          ) : null}
+        </>
+      ) : (
+        <ErrorText theme={theme} message={report.error ?? "查询失败"} />
+      )}
+    </Card>
+  );
+}
+
 function EmptyState({ theme, onOpenSettings }: { theme: PluginSurfaceProps["theme"]; onOpenSettings: () => void }) {
   return (
     <Card theme={theme} title="还没有配置账号">
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>
-        在设置里添加 Kimi API key 或 GLM key；Codex 会自动读取 ~/.codex/auth.json。
+        在设置里添加 Kimi / GLM / Command Code API key；Codex 会自动读取 ~/.codex/auth.json。
       </Text>
       <Pressable
         accessibilityRole="button"
@@ -313,7 +361,7 @@ export function QuotaScreen({ theme, layout }: PluginSurfaceProps) {
 
   const data = query.data;
   const empty =
-    data && data.kimi.length === 0 && data.glm.length === 0 && data.codex === null;
+    data && data.kimi.length === 0 && data.glm.length === 0 && data.codex === null && (data.commandcode ?? []).length === 0;
   const updatedAt = data ? new Date(data.fetchedAt) : null;
 
   return (
@@ -352,6 +400,9 @@ export function QuotaScreen({ theme, layout }: PluginSurfaceProps) {
         <GlmCard key={report.id} theme={theme} report={report} />
       ))}
       {data?.codex ? <CodexCard theme={theme} report={data.codex} /> : null}
+      {data?.commandcode.map((report) => (
+        <CommandCodeCard key={report.id} theme={theme} report={report} />
+      ))}
     </ScrollView>
   );
 }

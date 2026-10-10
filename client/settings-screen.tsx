@@ -16,6 +16,8 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
   const [newKey, setNewKey] = useState("");
   const [newGLabel, setNewGLabel] = useState("");
   const [newGKey, setNewGKey] = useState("");
+  const [newCLabel, setNewCLabel] = useState("");
+  const [newCKey, setNewCKey] = useState("");
   const [glmDrafts, setGlmDrafts] = useState<Record<string, string>>({});
 
   if (settings.status === "loading") {
@@ -56,8 +58,26 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
     }
   }
 
+  async function addCommandCode(): Promise<void> {
+    const key = newCKey.trim();
+    if (!key) return;
+    const label = newCLabel.trim() || `Command Code ${(values.commandcode ?? []).length + 1}`;
+    const id = `cc_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const ok = await save(
+      { ...values, commandcode: [...(values.commandcode ?? []), { id, label, key }] },
+      revision,
+    );
+    if (ok) {
+      setNewCLabel("");
+      setNewCKey("");
+    }
+  }
+
   return (
-    <SettingsSection title="账号" info="Kimi / GLM 的 API key 保存在本机 daemon 的设置存储里">
+    <SettingsSection
+      title="账号"
+      info="Kimi / GLM / Command Code 的 API key 保存在本机 daemon 的设置存储里。每个订阅的标签会作为使用情况弹窗卡片的标题；改名或新增订阅后需重启 Paseo daemon 生效。"
+    >
       {saveError ? (
         <Text style={{ color: theme.colors.statusDanger, fontSize: 12, paddingBottom: 8 }}>
           保存失败：{String(saveError)}
@@ -123,6 +143,47 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
         <SettingsInput label="新 GLM 订阅标签" placeholder="如 GLM Pro" disabled={saving} onChangeText={setNewGLabel} />
         <SettingsInput label="新 GLM API Key" placeholder="sk-…" secureTextEntry disabled={saving} onChangeText={setNewGKey} />
         <SettingsAction label="添加 GLM 订阅" actionLabel="添加" disabled={saving || !newGKey.trim()} onPress={() => void addGlm()} />
+      </SettingsCard>
+
+      <SettingsCard>
+        {(values.commandcode ?? []).map((entry) => (
+          <SettingsAction
+            key={entry.id}
+            label={`${entry.label}（···${entry.key.slice(-6)}）`}
+            actionLabel="删除"
+            disabled={saving}
+            onPress={() =>
+              void save(
+                { ...values, commandcode: (values.commandcode ?? []).filter((item) => item.id !== entry.id) },
+                revision,
+              )
+            }
+          />
+        ))}
+        {(values.commandcode ?? []).length === 0 ? (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            还没有添加 Command Code 订阅。key 形如 user_…，在 commandcode.ai/studio 生成。
+          </Text>
+        ) : null}
+        <SettingsInput
+          label="新 Command Code 订阅标签"
+          placeholder="如 goat 档"
+          disabled={saving}
+          onChangeText={setNewCLabel}
+        />
+        <SettingsInput
+          label="新 Command Code API Key"
+          placeholder="user_…"
+          secureTextEntry
+          disabled={saving}
+          onChangeText={setNewCKey}
+        />
+        <SettingsAction
+          label="添加 Command Code 订阅"
+          actionLabel="添加"
+          disabled={saving || !newCKey.trim()}
+          onPress={() => void addCommandCode()}
+        />
       </SettingsCard>
 
       <SettingsCard>

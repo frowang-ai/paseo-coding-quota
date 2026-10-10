@@ -3,7 +3,7 @@ import { quotaRpc, quotaSettings, type QuotaSettingsValues } from "./shared/quot
 import { getQuotaReport } from "./server/quota";
 import { registerCodingQuotaUsageSource } from "./server/usage-source";
 
-const DEFAULTS: QuotaSettingsValues = { kimi: [], glm: [], codexEnabled: true };
+const DEFAULTS: QuotaSettingsValues = { kimi: [], glm: [], commandcode: [], codexEnabled: true };
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(quotaSettings);
