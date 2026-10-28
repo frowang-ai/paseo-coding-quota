@@ -623,9 +623,10 @@ export async function getQuotaReport(
   if (!inflight) {
     inflight = (async () => {
       const config = await readSettings().catch(() => ({ kimi: [], glm: [], commandcode: [], codexEnabled: true }));
-      const kimi = (await Promise.all(config.kimi.map(fetchKimi))).map((r) => r.report);
-      const glm = (await Promise.all(config.glm.map(fetchGlm))).map((r) => r.report);
-      const commandcode = (await Promise.all((config.commandcode ?? []).map(fetchCommandCode))).map((r) => r.report);
+      const enabled = (entry: { enabled: boolean }): boolean => entry.enabled !== false;
+      const kimi = (await Promise.all(config.kimi.filter(enabled).map(fetchKimi))).map((r) => r.report);
+      const glm = (await Promise.all(config.glm.filter(enabled).map(fetchGlm))).map((r) => r.report);
+      const commandcode = (await Promise.all((config.commandcode ?? []).filter(enabled).map(fetchCommandCode))).map((r) => r.report);
       const codexResult = config.codexEnabled ? await fetchCodex() : null;
       const codex = codexResult ? codexResult.report : null;
       return { fetchedAt: new Date().toISOString(), kimi, glm, codex, commandcode } satisfies QuotaReport;

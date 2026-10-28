@@ -6,17 +6,28 @@ import { z } from "zod";
  * document (ordinary host JSON, not a credential vault — this plugin is meant
  * for a single-user trusted daemon).
  */
+/**
+ * Per-entry enable flag: disabled entries stay in settings but are hidden from
+ * the quota screen and the host Usage modal. Missing (pre-v4 data) means true.
+ */
+const accountEntry = z.object({
+  id: z.string(),
+  label: z.string(),
+  key: z.string(),
+  enabled: z.boolean().default(true),
+});
+
 export const quotaSettings = defineSettings({
   id: "coding-quota",
   scope: "host",
-  version: 3,
+  version: 4,
   schema: z.object({
-    /** Kimi coding-plan subscriptions; each entry is queried and shown separately. */
-    kimi: z.array(z.object({ id: z.string(), label: z.string(), key: z.string() })).default([]),
-    /** GLM Coding Plan subscriptions; each entry is queried and shown separately. */
-    glm: z.array(z.object({ id: z.string(), label: z.string(), key: z.string() })).default([]),
-    /** Command Code (commandcode.ai) plan keys; each entry is queried and shown separately. */
-    commandcode: z.array(z.object({ id: z.string(), label: z.string(), key: z.string() })).default([]),
+    /** Kimi coding-plan subscriptions; each enabled entry is queried and shown separately. */
+    kimi: z.array(accountEntry).default([]),
+    /** GLM Coding Plan subscriptions; each enabled entry is queried and shown separately. */
+    glm: z.array(accountEntry).default([]),
+    /** Command Code (commandcode.ai) plan keys; each enabled entry is queried and shown separately. */
+    commandcode: z.array(accountEntry).default([]),
     /** Auto-discover Codex credentials from ~/.codex/auth.json (CODEX_HOME honored). */
     codexEnabled: z.boolean().default(true),
   }),
@@ -24,20 +35,25 @@ export const quotaSettings = defineSettings({
     if (fromVersion === 1) {
       const old = values as { kimi?: unknown; glmKey?: unknown; codexEnabled?: unknown };
       return {
-        kimi: old.kimi ?? [],
+        kimi: withEnabled(old.kimi ?? []),
         glm: typeof old.glmKey === "string" && old.glmKey
-          ? [{ id: "glm-default", label: "GLM", key: old.glmKey }]
+          ? [{ id: "glm-default", label: "GLM", key: old.glmKey, enabled: true }]
           : [],
         commandcode: [],
         codexEnabled: old.codexEnabled ?? true,
       };
     }
-    if (fromVersion === 2) {
-      const old = values as { kimi?: unknown; glm?: unknown; codexEnabled?: unknown };
+    if (fromVersion === 2 || fromVersion === 3) {
+      const old = values as {
+        kimi?: unknown;
+        glm?: unknown;
+        commandcode?: unknown;
+        codexEnabled?: unknown;
+      };
       return {
-        kimi: old.kimi ?? [],
-        glm: old.glm ?? [],
-        commandcode: [],
+        kimi: withEnabled(old.kimi ?? []),
+        glm: withEnabled(old.glm ?? []),
+        commandcode: withEnabled(old.commandcode ?? []),
         codexEnabled: old.codexEnabled ?? true,
       };
     }
@@ -45,10 +61,20 @@ export const quotaSettings = defineSettings({
   },
 });
 
+/** v4 migration: every pre-v4 entry gains `enabled: true` (data preserved). */
+function withEnabled(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) =>
+    item && typeof item === "object"
+      ? { ...(item as Record<string, unknown>), enabled: true }
+      : item,
+  );
+}
+
 export interface QuotaSettingsValues {
-  kimi: { id: string; label: string; key: string }[];
-  glm: { id: string; label: string; key: string }[];
-  commandcode: { id: string; label: string; key: string }[];
+  kimi: { id: string; label: string; key: string; enabled: boolean }[];
+  glm: { id: string; label: string; key: string; enabled: boolean }[];
+  commandcode: { id: string; label: string; key: string; enabled: boolean }[];
   codexEnabled: boolean;
 }
 

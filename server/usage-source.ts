@@ -21,6 +21,8 @@
  *
  * Consequences of the static registration:
  *   - deleted entries disappear immediately (discover() re-reads settings);
+ *   - disabled entries (enabled === false) stay registered but discover()
+ *     returns no accounts for them, so their cards hide without a reload;
  *   - entries added after load are caught by the per-provider catch-all source
  *     and show up as e.g. "Kimi（新订阅）" until the plugin is reloaded
  *     (daemon restart), which also applies to renamed labels.
@@ -78,6 +80,23 @@ function errorReport(error: string | null, httpStatus: number | null): UsageRepo
   if (httpStatus === 401) return unavailable({ kind: "rejected", status: 401 });
   if (httpStatus === 403) return unavailable({ kind: "rejected", status: 403 });
   return { status: "error", error: error ?? "查询失败" };
+}
+
+/**
+ * One detail row with a window's exact reset time. The host renders a window's
+ * resetsAt as a coarse "resets in 1 day" string that the plugin cannot style,
+ * so the precise countdown goes into details, which pass strings through
+ * verbatim. Returns null when there is no reset time or it is unparseable.
+ */
+export function windowResetDetail(
+  id: string,
+  windowLabel: string,
+  resetAt: string | null,
+): UsageDetail | null {
+  if (!resetAt) return null;
+  const value = formatPeriodEndCountdown(resetAt);
+  if (!value) return null;
+  return { id, label: `${windowLabel}重置`, value };
 }
 
 function kimiWindows(report: KimiReport): UsageWindow[] {
@@ -183,7 +202,7 @@ async function readValues(
 function entriesOf(
   config: QuotaSettingsValues,
   provider: ProviderKind,
-): { id: string; label: string; key: string }[] {
+): { id: string; label: string; key: string; enabled: boolean }[] {
   if (provider === "kimi") return config.kimi;
   if (provider === "glm") return config.glm;
   return config.commandcode ?? [];
@@ -208,6 +227,7 @@ interface BootEntry {
   id: string;
   label: string;
   key: string;
+  enabled: boolean;
 }
 
 function bootEntries(value: unknown): BootEntry[] {
@@ -222,6 +242,7 @@ function bootEntries(value: unknown): BootEntry[] {
       id: record.id,
       label: typeof record.label === "string" ? record.label : "",
       key: record.key,
+      enabled: record.enabled !== false,
     });
   }
   return entries;
@@ -287,6 +308,13 @@ export function registerCodingQuotaUsageSource(
       // The host only knows USD/credits/requests/tokens units, so the CNY
       // wallet goes into plain detail rows instead of a mislabeled "$" bar.
       const details: UsageDetail[] = [];
+      for (const row of [
+        windowResetDetail("kimi-5h-reset", "5 小时窗口", result.report.fiveHour?.resetAt ?? null),
+        windowResetDetail("kimi-weekly-reset", "每周窗口", result.report.weekly?.resetAt ?? null),
+        windowResetDetail("kimi-monthly-reset", "每月窗口", result.report.monthly?.resetAt ?? null),
+      ]) {
+        if (row) details.push(row);
+      }
       if (wallet) {
         details.push({
           id: "kimi-wallet-used",
@@ -323,23 +351,28 @@ export function registerCodingQuotaUsageSource(
       const result = await fetchGlm(entry);
       if (!result.report.ok) return errorReport(result.report.error, result.httpStatus);
       const windows = glmWindows(result.report);
-      const details = result.report.toolCalls
-        ? [
-            {
-              id: "glm-tool-calls",
-              label: "月度工具调用",
-              value: `${result.report.toolCalls.used}/${result.report.toolCalls.limit} 次`,
-            },
-          ]
-        : undefined;
-      if (windows.length === 0 && !details) {
+      const details: UsageDetail[] = [];
+      for (const row of [
+        windowResetDetail("glm-5h-reset", "5 小时 token 窗口", result.report.fiveHour?.resetAt ?? null),
+        windowResetDetail("glm-weekly-reset", "每周 token 窗口", result.report.weekly?.resetAt ?? null),
+      ]) {
+        if (row) details.push(row);
+      }
+      if (result.report.toolCalls) {
+        details.push({
+          id: "glm-tool-calls",
+          label: "月度工具调用",
+          value: `${result.report.toolCalls.used}/${result.report.toolCalls.limit} 次`,
+        });
+      }
+      if (windows.length === 0 && details.length === 0) {
         return unavailable({ kind: "no_quota", detail: "该账号未返回额度窗口" });
       }
       return {
         status: "available",
         planLabel: `GLM ${result.report.level ?? ""} ···${result.report.keyTail}`.trim(),
         windows,
-        details,
+        details: details.length > 0 ? details : undefined,
       };
     }
     if (input.provider === "commandcode") {
@@ -377,6 +410,12 @@ export function registerCodingQuotaUsageSource(
         report.cancelAtPeriodEnd || report.cancelAt !== null || report.canceledAt !== null;
       const endIso = report.cancelAt ?? report.periodEnd;
       const details: { id: string; label: string; value: string }[] = [];
+      for (const row of [
+        windowResetDetail("cc-5h-reset", "5 小时窗口", report.fiveHour?.resetAt ?? null),
+        windowResetDetail("cc-weekly-reset", "每周窗口", report.weekly?.resetAt ?? null),
+      ]) {
+        if (row) details.push(row);
+      }
       if (report.monthlyCredits !== null) {
         details.push({ id: "cc-monthly", label: "月度剩余额度", value: `$${report.monthlyCredits.toFixed(2)}` });
       }
@@ -420,13 +459,19 @@ export function registerCodingQuotaUsageSource(
     if (windows.length === 0) {
       return unavailable({ kind: "no_quota", detail: "该账号未返回额度窗口" });
     }
+    const details: UsageDetail[] = [];
+    result.report.windows.forEach((window, index) => {
+      const row = windowResetDetail(`codex-win-${index}-reset`, window.label, window.resetAt);
+      if (row) details.push(row);
+    });
+    if (result.report.email) {
+      details.push({ id: "codex-email", label: "账号", value: result.report.email });
+    }
     return {
       status: "available",
       planLabel: result.report.plan ? `Codex ${result.report.plan}` : "Codex",
       windows,
-      details: result.report.email
-        ? [{ id: "codex-email", label: "账号", value: result.report.email }]
-        : undefined,
+      details: details.length > 0 ? details : undefined,
     };
   };
 
@@ -442,8 +487,9 @@ export function registerCodingQuotaUsageSource(
     async discover(scope) {
       if (scope.kind !== "global") return [];
       const config = await readValues(readSettings);
-      // Re-read live: a deleted entry drops its card without waiting for a reload.
-      if (!entriesOf(config, provider).some((item) => item.id === entryId)) return [];
+      // Re-read live: a deleted or disabled entry drops its card without waiting for a reload.
+      const entry = entriesOf(config, provider).find((item) => item.id === entryId);
+      if (!entry || entry.enabled === false) return [];
       const accounts: UsageAccount[] = [
         {
           key: `${provider}-${entryId}`,
@@ -468,7 +514,7 @@ export function registerCodingQuotaUsageSource(
       if (scope.kind !== "global") return [];
       const config = await readValues(readSettings);
       return entriesOf(config, provider)
-        .filter((item) => !covered[provider].has(item.id))
+        .filter((item) => item.enabled !== false && !covered[provider].has(item.id))
         .map(
           (item): UsageAccount => ({
             key: `${provider}-${item.id}`,
@@ -513,15 +559,17 @@ export function registerCodingQuotaUsageSource(
     async discover(scope) {
       if (scope.kind !== "global") return [];
       const config = await readValues(readSettings);
-      return entriesOf(config, provider).map(
-        (item): UsageAccount => ({
-          key: `${provider}-${item.id}`,
-          // Shown in the card footer; the title stays provider-named.
-          label: item.label || undefined,
-          harness: HARNESS[provider],
-          input: { provider, entryId: item.id } satisfies SourceInput,
-        }),
-      );
+      return entriesOf(config, provider)
+        .filter((item) => item.enabled !== false)
+        .map(
+          (item): UsageAccount => ({
+            key: `${provider}-${item.id}`,
+            // Shown in the card footer; the title stays provider-named.
+            label: item.label || undefined,
+            harness: HARNESS[provider],
+            input: { provider, entryId: item.id } satisfies SourceInput,
+          }),
+        );
     },
 
     fetch: fetchByProvider,

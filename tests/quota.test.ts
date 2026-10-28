@@ -1,9 +1,9 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexWindowLabel, glmWindowLabel, mapCodexBody, mapCommandCodeCredits, mapGlmBody, mapKimiBody } from "../server/quota";
-import { readBootSettings, registerCodingQuotaUsageSource } from "../server/usage-source";
+import { codexWindowLabel, glmWindowLabel, getQuotaReport, mapCodexBody, mapCommandCodeCredits, mapGlmBody, mapKimiBody } from "../server/quota";
+import { readBootSettings, registerCodingQuotaUsageSource, windowResetDetail } from "../server/usage-source";
 import { formatPeriodEndCountdown } from "../shared/format";
 
 /** Real response shape from https://api.kimi.com/coding/v1/usages (2026-10-05, ids sanitized). */
@@ -350,7 +350,7 @@ describe("formatPeriodEndCountdown", () => {
 
   it("uses the weekday within a week", () => {
     const weekday = ["日", "一", "二", "三", "四", "五", "六"][new Date(2026, 9, 13).getDay()];
-    expect(formatPeriodEndCountdown(at(2026, 9, 13, 8, 30), now)).toBe(`周${weekday} 08:30 · 还剩 2d20h`);
+    expect(formatPeriodEndCountdown(at(2026, 9, 13, 8, 30), now)).toBe(`周${weekday} 08:30 · 还剩 2d20h30m`);
   });
 
   it("falls back to MM-DD beyond a week", () => {
@@ -363,6 +363,30 @@ describe("formatPeriodEndCountdown", () => {
 
   it("returns empty for invalid input", () => {
     expect(formatPeriodEndCountdown("not-a-date", now)).toBe("");
+  });
+});
+
+describe("windowResetDetail", () => {
+  const now = new Date(2026, 9, 10, 12, 0).getTime();
+  const future = new Date(2026, 9, 10, 17, 30).toISOString();
+
+  it("builds a reset detail row with an exact countdown", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      expect(windowResetDetail("kimi-5h-reset", "5 小时窗口", future)).toEqual({
+        id: "kimi-5h-reset",
+        label: "5 小时窗口重置",
+        value: "今天 17:30 · 还剩 5h30m",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns null when the window has no usable reset time", () => {
+    expect(windowResetDetail("kimi-5h-reset", "5 小时窗口", null)).toBeNull();
+    expect(windowResetDetail("kimi-5h-reset", "5 小时窗口", "not-a-date")).toBeNull();
   });
 });
 
@@ -383,9 +407,9 @@ describe("readBootSettings", () => {
       }),
     );
     expect(readBootSettings(file("ok.json"))).toEqual({
-      kimi: [{ id: "kimi_a", label: "kimi-me-699", key: "sk-a" }],
-      glm: [{ id: "glm-default", label: "GLM", key: "sk-g" }],
-      commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c" }],
+      kimi: [{ id: "kimi_a", label: "kimi-me-699", key: "sk-a", enabled: true }],
+      glm: [{ id: "glm-default", label: "GLM", key: "sk-g", enabled: true }],
+      commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c", enabled: true }],
       codexEnabled: true,
     });
   });
@@ -395,7 +419,7 @@ describe("readBootSettings", () => {
       file("envelope.json"),
       JSON.stringify({ values: { kimi: [{ id: "k", label: "L", key: "K" }], glm: [], commandcode: [] } }),
     );
-    expect(readBootSettings(file("envelope.json"))?.kimi).toEqual([{ id: "k", label: "L", key: "K" }]);
+    expect(readBootSettings(file("envelope.json"))?.kimi).toEqual([{ id: "k", label: "L", key: "K", enabled: true }]);
   });
 
   it("drops malformed entries and defaults codexEnabled to true", () => {
@@ -404,8 +428,18 @@ describe("readBootSettings", () => {
       JSON.stringify({ kimi: [{ id: "ok", label: 5, key: "k" }, { nope: true }, "junk"], glm: [] }),
     );
     const boot = readBootSettings(file("partial.json"));
-    expect(boot?.kimi).toEqual([{ id: "ok", label: "", key: "k" }]);
+    expect(boot?.kimi).toEqual([{ id: "ok", label: "", key: "k", enabled: true }]);
     expect(boot?.codexEnabled).toBe(true);
+  });
+
+  it("preserves enabled: false from the settings file", () => {
+    writeFileSync(
+      file("disabled.json"),
+      JSON.stringify({ kimi: [{ id: "k", label: "L", key: "K", enabled: false }] }),
+    );
+    expect(readBootSettings(file("disabled.json"))?.kimi).toEqual([
+      { id: "k", label: "L", key: "K", enabled: false },
+    ]);
   });
 
   it("returns null for missing, garbage, or entry-less files", () => {
@@ -422,11 +456,11 @@ describe("registerCodingQuotaUsageSource", () => {
   const settingsFile = join(bootDir, "plugin-settings", "paseo-coding-quota", "coding-quota.json");
   const bootConfig = {
     kimi: [
-      { id: "kimi_a", label: "kimi-me-699", key: "sk-a" },
-      { id: "kimi_b", label: "kimi-2-199", key: "sk-b" },
+      { id: "kimi_a", label: "kimi-me-699", key: "sk-a", enabled: true },
+      { id: "kimi_b", label: "kimi-2-199", key: "sk-b", enabled: true },
     ],
-    glm: [{ id: "glm-default", label: "GLM", key: "sk-g" }],
-    commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c" }],
+    glm: [{ id: "glm-default", label: "GLM", key: "sk-g", enabled: true }],
+    commandcode: [{ id: "cc_goat_default", label: "CmdCode goat", key: "user_c", enabled: true }],
     codexEnabled: false,
   };
   const previousPaseoHome = process.env.PASEO_HOME;
@@ -487,7 +521,7 @@ describe("registerCodingQuotaUsageSource", () => {
 
     const live = {
       ...bootConfig,
-      kimi: [...bootConfig.kimi, { id: "kimi_new", label: "new", key: "sk-n" }],
+      kimi: [...bootConfig.kimi, { id: "kimi_new", label: "new", key: "sk-n", enabled: true }],
     };
     const liveServer = stubServer();
     registerCodingQuotaUsageSource(liveServer.server as never, async () => live);
@@ -499,10 +533,83 @@ describe("registerCodingQuotaUsageSource", () => {
     ]);
   });
 
+  it("hides disabled entries from discover without deleting their data", async () => {
+    process.env.PASEO_HOME = bootDir;
+    mkdirSync(join(bootDir, "plugin-settings", "paseo-coding-quota"), { recursive: true });
+    writeFileSync(settingsFile, JSON.stringify(bootConfig));
+
+    const live = {
+      ...bootConfig,
+      kimi: [
+        bootConfig.kimi[0],
+        { ...bootConfig.kimi[1], enabled: false },
+        { id: "kimi_off", label: "off", key: "sk-o", enabled: false },
+      ],
+      glm: [{ ...bootConfig.glm[0], enabled: false }],
+    };
+    const { server, sources } = stubServer();
+    registerCodingQuotaUsageSource(server as never, async () => live);
+
+    // Static registration is unchanged: every boot entry still owns a source.
+    expect(sources.map((s) => s.label)).toContain("kimi-2-199");
+
+    // The per-account source discovers nothing while the entry is disabled.
+    const disabled = sources.find((s) => s.label === "kimi-2-199") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string }[]>;
+    };
+    expect(await disabled.discover({ kind: "global" })).toEqual([]);
+
+    // The catch-all also skips disabled entries (covered or not).
+    const catchAll = sources.find((s) => s.label === "Kimi（新订阅）") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string }[]>;
+    };
+    expect(await catchAll.discover({ kind: "global" })).toEqual([]);
+
+    const glmCatchAll = sources.find((s) => s.label === "GLM（新订阅）") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string }[]>;
+    };
+    expect(await glmCatchAll.discover({ kind: "global" })).toEqual([]);
+
+    // Enabled entries are unaffected.
+    const enabled = sources.find((s) => s.label === "kimi-me-699") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string }[]>;
+    };
+    expect((await enabled.discover({ kind: "global" })).map((a) => a.key)).toEqual(["kimi-kimi_a"]);
+  });
+
+  it("provider-named fallback sources skip disabled entries", async () => {
+    process.env.PASEO_HOME = join(bootDir, "does-not-exist");
+    const live = {
+      ...bootConfig,
+      kimi: [{ ...bootConfig.kimi[0], enabled: false }, bootConfig.kimi[1]],
+    };
+    const { server, sources } = stubServer();
+    registerCodingQuotaUsageSource(server as never, async () => live);
+    const kimi = sources.find((s) => s.label === "Kimi") as unknown as {
+      discover: (scope: { kind: string }) => Promise<{ key: string }[]>;
+    };
+    expect((await kimi.discover({ kind: "global" })).map((a) => a.key)).toEqual(["kimi-kimi_b"]);
+  });
+
   it("falls back to provider-named sources when the settings file is unreadable", () => {
     process.env.PASEO_HOME = join(bootDir, "does-not-exist");
     const { server, sources } = stubServer();
     registerCodingQuotaUsageSource(server as never, async () => bootConfig);
     expect(sources.map((s) => s.label)).toEqual(["Kimi", "GLM", "CmdCode", "Codex（ChatGPT）"]);
+  });
+});
+
+describe("getQuotaReport", () => {
+  it("omits disabled entries from the report without fetching them", async () => {
+    const report = await getQuotaReport(async () => ({
+      kimi: [{ id: "k", label: "L", key: "sk-disabled", enabled: false }],
+      glm: [{ id: "g", label: "G", key: "sk-disabled", enabled: false }],
+      commandcode: [{ id: "c", label: "C", key: "user_disabled", enabled: false }],
+      codexEnabled: false,
+    }));
+    expect(report.kimi).toEqual([]);
+    expect(report.glm).toEqual([]);
+    expect(report.commandcode).toEqual([]);
+    expect(report.codex).toBeNull();
   });
 });

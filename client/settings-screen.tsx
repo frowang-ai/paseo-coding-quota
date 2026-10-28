@@ -6,9 +6,11 @@ import {
   SettingsSection,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
-import { useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { Text } from "react-native";
 import { quotaSettings } from "../shared/quota";
+
+type AccountEntry = { id: string; label: string; key: string; enabled: boolean };
 
 export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
   const settings = useSettings(quotaSettings);
@@ -37,12 +39,51 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
 
   const { values, revision, save, saving, saveError } = settings;
 
+  function saveEntries(
+    provider: "kimi" | "glm" | "commandcode",
+    nextEntries: AccountEntry[],
+  ): Promise<boolean> {
+    if (provider === "kimi") return save({ ...values, kimi: nextEntries }, revision);
+    if (provider === "glm") return save({ ...values, glm: nextEntries }, revision);
+    return save({ ...values, commandcode: nextEntries }, revision);
+  }
+
+  function entryRows(
+    provider: "kimi" | "glm" | "commandcode",
+    entries: AccountEntry[],
+  ): ReactNode {
+    return entries.map((entry) => (
+      <Fragment key={entry.id}>
+        <SettingsAction
+          label={`${entry.label}（···${entry.key.slice(-6)}）${entry.enabled === false ? " · 已停用" : ""}`}
+          actionLabel="删除"
+          disabled={saving}
+          onPress={() => {
+            void saveEntries(provider, entries.filter((item) => item.id !== entry.id));
+          }}
+        />
+        <SettingsSwitch
+          label={`显示 ${entry.label}`}
+          hint={entry.enabled === false ? "已停用：配额屏与 Usage 弹窗均不显示，数据保留" : undefined}
+          value={entry.enabled !== false}
+          disabled={saving}
+          onValueChange={(next) => {
+            void saveEntries(
+              provider,
+              entries.map((item) => (item.id === entry.id ? { ...item, enabled: next } : item)),
+            );
+          }}
+        />
+      </Fragment>
+    ));
+  }
+
   async function addGlm(): Promise<void> {
     const key = newGKey.trim();
     if (!key) return;
     const label = newGLabel.trim() || `GLM ${values.glm.length + 1}`;
     const id = `glm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const ok = await save({ ...values, glm: [...values.glm, { id, label, key }] }, revision);
+    const ok = await save({ ...values, glm: [...values.glm, { id, label, key, enabled: true }] }, revision);
     if (ok) { setNewGLabel(""); setNewGKey(""); }
   }
 
@@ -51,7 +92,7 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
     if (!key) return;
     const label = newLabel.trim() || `Kimi ${values.kimi.length + 1}`;
     const id = `kimi_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const ok = await save({ ...values, kimi: [...values.kimi, { id, label, key }] }, revision);
+    const ok = await save({ ...values, kimi: [...values.kimi, { id, label, key, enabled: true }] }, revision);
     if (ok) {
       setNewLabel("");
       setNewKey("");
@@ -64,7 +105,7 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
     const label = newCLabel.trim() || `Command Code ${(values.commandcode ?? []).length + 1}`;
     const id = `cc_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const ok = await save(
-      { ...values, commandcode: [...(values.commandcode ?? []), { id, label, key }] },
+      { ...values, commandcode: [...(values.commandcode ?? []), { id, label, key, enabled: true }] },
       revision,
     );
     if (ok) {
@@ -85,20 +126,7 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
       ) : null}
 
       <SettingsCard>
-        {values.kimi.map((entry) => (
-          <SettingsAction
-            key={entry.id}
-            label={`${entry.label}（···${entry.key.slice(-6)}）`}
-            actionLabel="删除"
-            disabled={saving}
-            onPress={() => {
-              void save(
-                { ...values, kimi: values.kimi.filter((item) => item.id !== entry.id) },
-                revision,
-              );
-            }}
-          />
-        ))}
+        {entryRows("kimi", values.kimi)}
         {values.kimi.length === 0 ? (
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
             还没有添加 Kimi 订阅。每个订阅会单独显示 5 小时 / 每周窗口和加速钱包。
@@ -126,15 +154,7 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
       </SettingsCard>
 
       <SettingsCard>
-        {values.glm.map((entry) => (
-          <SettingsAction
-            key={entry.id}
-            label={`${entry.label}（···${entry.key.slice(-6)}）`}
-            actionLabel="删除"
-            disabled={saving}
-            onPress={() => void save({ ...values, glm: values.glm.filter((item) => item.id !== entry.id) }, revision)}
-          />
-        ))}
+        {entryRows("glm", values.glm)}
         {values.glm.length === 0 ? (
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
             还没有添加 GLM 订阅。每个账号会单独显示 5 小时 / 每周窗口。
@@ -146,20 +166,7 @@ export function QuotaSettingsScreen({ theme }: PluginSurfaceProps) {
       </SettingsCard>
 
       <SettingsCard>
-        {(values.commandcode ?? []).map((entry) => (
-          <SettingsAction
-            key={entry.id}
-            label={`${entry.label}（···${entry.key.slice(-6)}）`}
-            actionLabel="删除"
-            disabled={saving}
-            onPress={() =>
-              void save(
-                { ...values, commandcode: (values.commandcode ?? []).filter((item) => item.id !== entry.id) },
-                revision,
-              )
-            }
-          />
-        ))}
+        {entryRows("commandcode", values.commandcode ?? [])}
         {(values.commandcode ?? []).length === 0 ? (
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
             还没有添加 Command Code 订阅。key 形如 user_…，在 commandcode.ai/studio 生成。

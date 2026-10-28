@@ -22,20 +22,20 @@ function hhmm(date: Date): string {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
-/** "2h17m" / "3d4h" / "45m" style remaining-time text. */
+/** "2h17m" / "3d4h5m" / "45m" style remaining-time text. */
 function formatRemaining(diffMs: number): string {
   const totalMinutes = Math.floor(diffMs / 60_000);
   const days = Math.floor(totalMinutes / 1440);
   const hours = Math.floor((totalMinutes % 1440) / 60);
   const minutes = totalMinutes % 60;
-  if (days >= 1) return days >= 10 ? `${days}d` : `${days}d${hours}h`;
+  if (days >= 1) return days >= 10 ? `${days}d` : `${days}d${hours}h${minutes}m`;
   if (hours >= 1) return `${hours}h${minutes}m`;
   return `${minutes}m`;
 }
 
 /**
  * Local time plus remaining time for a future timestamp, e.g.
- * "今晚 22:33 · 还剩 2h17m" or "周五 09:00 · 还剩 2d20h".
+ * "今晚 22:33 · 还剩 2h17m" or "周五 09:00 · 还剩 2d20h13m".
  * Timestamps already in the past collapse to "已到期"; unparseable input
  * returns "" so callers can fall back to a raw value.
  */
